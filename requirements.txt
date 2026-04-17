@@ -1,6 +1,6 @@
 streamlit
 ccxt
 pandas
-numpy<2.0.0
 pandas-ta
+numpy<2.0.0
 plotly
