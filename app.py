@@ -2208,7 +2208,34 @@ with tab_screener:
             all_coins = [c if "/" in c else f"{c}/USDT" for c in all_coins]
             all_coins = list(dict.fromkeys(all_coins)) 
         elif scan_source == "Midas Kripto":
-            midas_tickers = ["BTC", "ETH", "XRP", "BNB", "USDC", "SOL", "TRX", "DOGE", "HYPE", "ADA", "BCH", "LINK", "XLM", "RAVE", "LTC", "AVAX", "PYUSD", "SUI", "HBAR", "SHIB", "TON", "CRO", "TAO", "XAUT", "WLFI", "PAXG", "MNT", "DOT", "UNI", "NEAR", "PI", "SKY", "OKB", "AAVE", "ASTR", "PEPE", "ICP", "ONDO", "ENA", "DEXE", "ALGO", "KAS", "RNDR", "POL", "QNT", "ATOM", "WLD", "APT", "ARB", "MORPHO", "FIL", "FLR", "PUMP", "JUP", "VET", "ZRO", "XDC", "NEXO", "BONK", "FET", "CAKE", "VIRTUAL", "PUDGY", "SIREN", "STX", "ETHFI", "CHZ", "VVV", "SEI", "AERO", "CELIA", "CRV", "H", "LDO", "SPX", "IMX", "CFX", "INJ", "GNO", "KAIA", "BTT", "2Z", "FLOKI", "JASMY", "OP", "SYRUP", "THE", "PYTH", "IOTA", "KITE", "LIT", "COMP", "PENDLE", "XPL", "STRK", "FARTCOIN", "WIF", "IP", "NEO", "THETA", "AXS", "VSN", "MANA", "RAY", "TWT", "XCN", "FF", "WAL", "ZK", "CALA", "JTO", "EIGEN", "1INCH", "S", "EGLD", "AR", "0G", "CFG", "ORDI", "ENJ", "SENT", "KAITO", "DYDX", "LPT", "QUBIC", "COW", "BERA", "BEAT", "ZEN", "SNX", "BEAM", "QTUM", "BARD", "GRASS", "SKR", "ROSE", "KSM", "ZETA", "TURBO", "SUPER", "TOSHI", "MINA", "APE", "CKB", "AMP", "BRETT", "MET", "HOT", "FOGO", "RON", "W", "SAHARA", "HOME", "BLUR", "ZORA", "NMR", "PNUT", "COAI", "AXL", "PLUME", "ACH", "SUSHI", "BIO", "MOG", "ORCA", "MOODENG", "MEW", "TRB", "LINEA", "ANKR", "HUMA", "MAGIC", "REDSTONE", "ROBO", "CSPR", "MASK", "SKL", "STORJ", "VANA", "MERL", "COTI", "NEIRO", "G", "UMA", "NOT", "GOPLUS", "SOMI", "AUDIO", "IO", "GMT", "BOME", "SOLAYER", "MEME", "CYBER", "OPEN", "CORE", "ARKA", "AUCTION", "REZ", "CTSI", "OM", "STEEM", "PHA", "BREV", "ACROSS", "METIS", "NAORIS", "ARIA", "BB", "AIXBT", "SPELL", "BASED", "ARKM", "ANIME", "OPN", "API3", "WET", "USUAL", "SXT", "AEVO", "KERNEL", "ORDER", "ZKC", "WCT", "KAT", "ALLO", "QANX", "CETUS", "XAI", "TNSR", "CATI", "VINE", "RARE", "ENSO", "GOAT", "DEGEN", "DOGS", "NEWT", "INIT", "OGN", "ARPA", "LUMIA", "ACT", "RAD", "PSG", "PORTO", "VANRY", "BAR", "MYSHELL", "ASR", "TREE", "HMSTR", "BMT", "DYM", "SAGA", "BEL", "ATM", "LAZIO", "SCR", "CITY", "JUV", "TRU", "SOLV", "EDEN", "ZEUS", "ELIZA", "PRCL", "ACM", "EURT", "ACA", "MOVE", "BAKE", "SELF", "BELIEVE", "TROY", "BNX", "OMNI", "EOS"]
+            midas_tickers = [
+                "WCT", "0G", "1INCH", "AEVO", "AAVE", "ACM", "ACX", "ACT", "AERO", "AI16Z", 
+                "AIXBT", "ACH", "ALGO", "ALLO", "AMP", "ANIME", "ANKR", "APE", "API3", "APT", 
+                "ARB", "ARK", "ARKM", "ARPA", "FET", "AR", "ASR", "ASTR", "ASTER", "ATM", 
+                "BEAT", "AUDIO", "AVAX", "AXL", "AXS", "BEAM", "BEL", "BERA", "BNB", "BNX", 
+                "BIO", "BTC", "BCH", "TAO", "BTT", "BLUR", "BONK", "BOME", "AUCTION", "BB", 
+                "ZKC", "BRETT", "BREV", "BMT", "GALA", "ADA", "MEW", "CATI", "TIA", "CFG", 
+                "CETUS", "LINK", "COAI", "CHZ", "COMP", "CFX", "CORE", "ATOM", "COTI", "COW", 
+                "CRO", "CRV", "CYBER", "MANA", "HOME", "DEGEN", "DOGE", "DOGS", "WIF", "2Z", 
+                "DYDX", "DYM", "EIGEN", "ENJ", "ENSO", "EOS", "ENA", "ETHFI", "ETH", "ENS", 
+                "ROBO", "FF", "FARTCOIN", "BAR", "PORTO", "FIL", "FLOKI", "FOGO", "GMT", "GOAT", 
+                "GPS", "GRASS", "G", "HMSTR", "HBAR", "HOT", "ZEN", "HUMA", "H", "WET", "HYPE", 
+                "IMX", "INIT", "INJ", "ICP", "IO", "IOTA", "JASMY", "JTO", "JUP", "JUV", "KAIA", 
+                "KAITO", "KAS", "KERNEL", "KITE", "KSM", "LAUNCHCOIN", "ZRO", "LDO", "LIT", "LINEA", 
+                "LTC", "LPT", "BARD", "LUMIA", "ME", "CITY", "OM", "MANTA", "SYRUP", "MASK", 
+                "MEME", "MERL", "MET", "METIS", "MINA", "MOG", "MOODENG", "MORPHO", "MOVE", "EGLD", 
+                "SHELL", "NEAR", "NEIRO", "NEO", "NEWT", "NOT", "NMR", "ROSE", "TRUMP", "OMNI", 
+                "ONDO", "XCN", "EDU", "EDEN", "OPN", "OP", "ORCA", "ORDER", "ORDI", "OGN", "CAKE", 
+                "PRCL", "PSG", "PAXG", "PYUSD", "PNUT", "PENDLE", "PEPE", "PHA", "PI", "PIXEL", 
+                "XPL", "PLUME", "DOT", "POL", "PENGU", "PUMP", "PYTH", "QTUM", "QNT", "RAD", "RAVE", 
+                "RAY", "RIO", "RED", "RENDER", "REZ", "XRP", "RONIN", "LAZIO", "SAGA", "SAHARA", 
+                "SCR", "SKR", "SEI", "SENT", "SHIB", "CAT", "SKL", "SKY", "SOL", "LAYER", "SOLV", 
+                "SOMI", "S", "SXT", "SPELL", "SPX", "STX", "STRK", "XLM", "STEEM", "STORJ", "IP", 
+                "SUI", "RARE", "SUPER", "SUSHI", "SNX", "TRB", "TNSR", "USDT", "EURT", "XAUT", 
+                "GRT", "SAND", "THETA", "TON", "TOSHI", "MAGIC", "TREE", "TRX", "TRU", "TWT", 
+                "TURBO", "UMA", "UNI", "USDC", "USUAL", "VANA", "VANRY", "VET", "VVV", "VINE", 
+                "VIRTUAL", "VSN", "WAL", "WLFI", "WLD", "W", "XAI", "ZETA", "ZEUS", "ZK", "ZORA"
+            ]
             midas_coins = [f"{c}/USDT" for c in midas_tickers]
             # Sadece KuCoin'de gerçekten var olanları tut (Hata almamak için)
             all_coins = [c for c in midas_coins if c in kucoin_universe][:scan_count]
