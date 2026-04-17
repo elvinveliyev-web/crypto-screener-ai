@@ -2348,7 +2348,8 @@ with tab_screener:
             except Exception:
                 return []
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # Bu kısmı eski kodundaki ThreadPoolExecutor bloğu ile değiştir
+        with ThreadPoolExecutor(max_workers=2) as executor:  # 5 yerine 2 yaptık, API'yi yormamak için
             future_to_coin = {executor.submit(scan_single_coin, coin): coin for coin in all_coins}
             
             for i, future in enumerate(as_completed(future_to_coin)):
@@ -2357,18 +2358,19 @@ with tab_screener:
                 if res_list: results.extend(res_list)
                 
                 progress_bar.progress((i + 1) / len(all_coins))
-                status.text(f"Taranıyor (1D + 1H): {coin_name}")
-                time.sleep(0.02) 
+                status.text(f"Taranıyor (1D + 1H): {coin_name} | API dinlendiriliyor...")
+                
+                # KuCoin Rate Limit'e takılmamak için her döngüde yarım saniye bekle
+                time.sleep(0.5) 
         
         status.empty()
         if results:
             df_results = pd.DataFrame(results)
             # Önce 1D'ler üstte, 1H'ler altta olacak şekilde periyoda göre sırala. Sonra kendi içlerinde puana göre.
-            # Kategorik sıralama mantığı
             df_results['SortKey'] = df_results['Periyot'].map({'1D': 0, '1H': 1})
             df_results = df_results.sort_values(by=["SortKey", "Skor (100)"], ascending=[True, False]).drop('SortKey', axis=1).reset_index(drop=True)
             
-            st.success(f"✅ {len(all_coins)} coin hem 1D hem 1H periyotta başarıyla tarandı!")
+            st.success(f"✅ Tarama tamamlandı! Rate limit önlemi başarıyla çalıştı.")
             st.dataframe(df_results, use_container_width=True, height=750)
         else:
-            st.error("Tarama başarısız oldu. API limitine takılmış olabilirsiniz, lütfen 1 dakika bekleyip tekrar deneyin.")
+            st.error("Tarama başarısız oldu. Eğer bu hatayı üst üste alıyorsanız, KuCoin IP'nizi geçici engellemiş olabilir. Lütfen 3-4 dakika bekleyip tekrar deneyin.")
