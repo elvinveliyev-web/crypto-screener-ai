@@ -1,7 +1,8 @@
 streamlit
 ccxt
 pandas
-pandas-ta
+numpy
 plotly
-feedparser
-google-generativeai
+requests
+kaleido
+reportlab
