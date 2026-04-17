@@ -3,3 +3,5 @@ ccxt
 pandas
 pandas-ta
 plotly
+feedparser
+google-generativeai
