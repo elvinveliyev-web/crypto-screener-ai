@@ -2,5 +2,4 @@ streamlit
 ccxt
 pandas
 pandas-ta
-numpy<2.0.0
 plotly
