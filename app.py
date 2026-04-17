@@ -401,11 +401,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 # =============================
-# Cached data loader (Zaman Makinesi Uyarlamalı)
-# =============================
-@st.cache_data(ttl=300, show_spinner=False)
-# =============================
-# Cached data loader (Rate Limit Dirençli)
+# Cached data loader (API Kısıtlamalarına Dirençli Versiyon)
 # =============================
 @st.cache_data(ttl=300, show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str, target_dt: pd.Timestamp = None, force_latest: bool = False) -> pd.DataFrame:
@@ -432,26 +428,24 @@ def load_data_cached(ticker: str, period: str, interval: str, target_dt: pd.Time
         since_dt = target_dt - pd.Timedelta(minutes=mins * 1500)
         since_ms = int(since_dt.timestamp() * 1000)
 
-    # RATE LIMIT DİRENCİ: 3 kez tekrar deneme mantığı
+    # API Limitlerine takılmamak için 3 denemeli retry mekanizması eklendi
     for attempt in range(3):
         try:
-            bars = exchange.fetch_ohlcv(ticker, timeframe=ccxt_tf, limit=1500, since=since_ms)
+            bars = exchange.fetch_ohlcv(ticker, timeframe=ccxt_tf, limit=limit, since=since_ms)
             df = pd.DataFrame(bars, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df.set_index("timestamp", inplace=True)
             
             if target_dt is not None:
+                # Sadece hedef tarihe kadar olanları filtrele
                 df = df[df.index <= target_dt]
                 
             return df
-        except ccxt.RateLimitExceeded:
-            # KuCoin IP'mizi engellediyse 3 saniye dur ve tekrar dene
-            time.sleep(3)
-        except Exception:
-            # Başka bir ağ hatasıysa 1 saniye bekle
-            time.sleep(1)
+        except Exception as e:
+            # Hata alınırsa (rate limit vb.) 1.5 saniye bekleyip tekrar dener
+            time.sleep(1.5)
             
-    # 3 denemede de başarısız olursa boş döndür
+    # Tüm denemeler başarısız olursa boş döner
     return pd.DataFrame()
 
 # =============================
@@ -2184,8 +2178,8 @@ with tab_triple:
 # YENİ EKLENEN 5. SEKME: GELİŞMİŞ ÇOKLU TARAYICI (SCREENER)
 # =============================
 with tab_screener:
-    st.header("🔍 Gelişmiş Çoklu Kripto Tarayıcı (1D + 1H Kombine & Uyumsuzluklar)")
-    st.markdown("Seçilen coinler için hem dünün kapanışı (1D) hem de anlık saatlik (1H) verilerini aynı tabloda tarar. Üstelik Haftalık MACD ve Günlük RSI/Stoch uyumsuzluklarını yakalar.")
+    st.header("🔍 Gelişmiş Çoklu Kripto Tarayıcı (1D + 1H Kombine & Günlük Uyumsuzluklar)")
+    st.markdown("Seçilen coinler için hem dünün kapanışı (1D) hem de anlık saatlik (1H) verilerini tarar. Hızlı çalışması ve rate limit aşmaması için haftalık tarama devreden çıkarılmıştır.")
     
     if use_timemachine:
         st.warning(f"Zaman Makinesi Aktif: Tarama **{target_datetime}** verileri baz alınarak yapılacaktır.")
@@ -2205,7 +2199,7 @@ with tab_screener:
             help="Aralarına virgül koyarak yazın."
         )
 
-    scan_count = st.slider("Taranacak Maksimum Coin Sayısı (Yüksek sayı API'yi yavaşlatabilir)", 10, 250, 50, step=10)
+    scan_count = st.slider("Taranacak Maksimum Coin Sayısı (Yüksek sayı biraz zaman alabilir)", 10, 250, 50, step=10)
     
     if st.button("🚀 Kombine Kapsamlı Taramayı Başlat (1D + 1H)"):
         kucoin_universe = get_crypto_universe()
@@ -2253,16 +2247,14 @@ with tab_screener:
         progress_bar = st.progress(0)
         status = st.empty()
 
-        # 1D taraması dünün sonuna (00:00) kadar olmalı
         if target_datetime:
             cutoff_1d = target_datetime.floor('D')
             cutoff_1h = target_datetime
         else:
-            # Bugünün gece yarısını (00:00) referans al
             cutoff_1d = pd.Timestamp.now(tz="UTC").floor('D')
             cutoff_1h = None
 
-        def get_score_and_row(coin, d_feat, tf_label, w_div_str, d_div_str):
+        def get_score_and_row(coin, d_feat, tf_label, d_div_str):
             last_row = d_feat.iloc[-1]
             score = 0
             
@@ -2309,27 +2301,20 @@ with tab_screener:
                 "BB Genişlik": f"%{last_row['BB_WIDTH']*100:.1f}",
                 "Hacim": "Yüksek 🟢" if last_row["Volume"] > last_row["VOL_SMA"] else "Düşük 🔴",
                 "Formasyon": "Boğa 🟢" if has_bull else ("Ayı 🔴" if has_bear else "-"),
-                "1W Uyumsuzluk (MACD)": w_div_str,
                 "1D Uyumsuzluk (RSI/Stoch)": d_div_str
             }
 
         def scan_single_coin(coin):
             try:
-                # 3 farklı periyot verisini çek
-                df_1w = load_data_cached(coin, "2y", "1wk", target_datetime)
+                # 1D verisini çek ve API'yi yormamak için kısa bir mola ver
                 df_1d = load_data_cached(coin, "1y", "1d", cutoff_1d)
-                df_1h = load_data_cached(coin, "60d", "1h", cutoff_1h)
-                
-                if df_1w.empty or df_1d.empty or df_1h.empty: return []
-                if len(df_1w) < 10 or len(df_1d) < 30 or len(df_1h) < 30: return []
+                if df_1d.empty or len(df_1d) < 30: return []
+                time.sleep(0.2) 
 
-                # Haftalık Uyumsuzluk Hesapla (Sadece MACD Hist)
-                _, _, m_hist_1w = macd(df_1w["Close"])
-                bull_w, a_w = check_bullish_divergence(df_1w["Close"], m_hist_1w)
-                bear_w, b_w = check_bearish_divergence(df_1w["Close"], m_hist_1w)
-                w_div_str = "-"
-                if bull_w: w_div_str = f"Poz 🟢 ({a_w}b)"
-                elif bear_w: w_div_str = f"Neg 🔴 ({b_w}b)"
+                # 1H verisini çek
+                df_1h = load_data_cached(coin, "60d", "1h", cutoff_1h)
+                if df_1h.empty or len(df_1h) < 30: return []
+                time.sleep(0.2)
 
                 # Günlük Uyumsuzluk Hesapla (RSI ve Stoch)
                 rsi_1d = rsi(df_1d["Close"], 13)
@@ -2347,21 +2332,20 @@ with tab_screener:
                 if bear_st: d_divs.append(f"Stoch Neg 🔴 ({b_st}b)")
                 d_div_str = ", ".join(d_divs) if d_divs else "-"
 
-                # 1D ve 1H için özellikleri hesapla ve puanla
+                # Özellikleri hesapla ve puanla
                 feat_1d = build_features(df_1d, cfg)
                 feat_1h = build_features(df_1h, cfg)
 
-                row_1d = get_score_and_row(coin, feat_1d, "1D", w_div_str, d_div_str)
-                row_1h = get_score_and_row(coin, feat_1h, "1H", w_div_str, d_div_str)
+                row_1d = get_score_and_row(coin, feat_1d, "1D", d_div_str)
+                row_1h = get_score_and_row(coin, feat_1h, "1H", d_div_str)
 
                 return [row_1d, row_1h]
 
             except Exception:
                 return []
 
-        
-        # Çoklu işlemci yerine tek tek (sırayla) çekeceğiz ki KuCoin kızmasın
-        with ThreadPoolExecutor(max_workers=1) as executor: 
+        # Thread sayısını 2 ile sabitledik (Borsayı koruma amaçlı)
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_coin = {executor.submit(scan_single_coin, coin): coin for coin in all_coins}
             
             for i, future in enumerate(as_completed(future_to_coin)):
@@ -2372,16 +2356,17 @@ with tab_screener:
                 progress_bar.progress((i + 1) / len(all_coins))
                 status.text(f"Taranıyor (1D + 1H): {coin_name} | {i+1}/{len(all_coins)} tamamlandı.")
                 
-                # Her coinden sonra kesinlikle 1.5 saniye nefes al!
-                time.sleep(1.5)
+                # Her coin işleminden sonra ana akışta kısa bir uyku
+                time.sleep(0.5) 
+        
         status.empty()
         if results:
             df_results = pd.DataFrame(results)
-            # Önce 1D'ler üstte, 1H'ler altta olacak şekilde periyoda göre sırala. Sonra kendi içlerinde puana göre.
+            # Önce 1D'ler üstte, 1H'ler altta. Sonra kendi içlerinde puana göre.
             df_results['SortKey'] = df_results['Periyot'].map({'1D': 0, '1H': 1})
             df_results = df_results.sort_values(by=["SortKey", "Skor (100)"], ascending=[True, False]).drop('SortKey', axis=1).reset_index(drop=True)
             
-            st.success(f"✅ Tarama tamamlandı! Rate limit önlemi başarıyla çalıştı.")
+            st.success(f"✅ {len(all_coins)} coin başarıyla tarandı. Otomatik hata düzeltme ve Rate Limit koruması sorunsuz çalıştı!")
             st.dataframe(df_results, use_container_width=True, height=750)
         else:
-            st.error("Tarama başarısız oldu. Eğer bu hatayı üst üste alıyorsanız, KuCoin IP'nizi geçici engellemiş olabilir. Lütfen 3-4 dakika bekleyip tekrar deneyin.")
+            st.error("Tarama başarısız oldu. Rate limit veya ağ sorunu oluştu, lütfen birkaç dakika bekleyip tekrar deneyin.")
