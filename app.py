@@ -6,161 +6,138 @@ import plotly.graph_objects as go
 import concurrent.futures
 import time
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Kripto Tarayıcı & AI", layout="wide", page_icon="🚀")
-st.title("🚀 Kripto Piyasa Tarayıcısı (V1)")
+# --- SAYFA VE MARKA AYARLARI ---
+st.set_page_config(page_title="MarketPlus By Valiyev | Crypto AI", layout="wide", page_icon="💹")
+
+# Özel CSS ile daha profesyonel bir görünüm
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("💹 MarketPlus By Valiyev | Crypto AI Pro")
+st.caption("Master 5 AI Algoritması ile Kripto Para Teknik Analiz ve Tarama Sistemi")
 
 # --- BORSA BAĞLANTISI ---
-# Binance coğrafi engelini aşmak için KuCoin kullanıyoruz. API Key gerekmez.
-exchange = ccxt.kucoin({
-    'enableRateLimit': True, # CCXT'nin kendi hız koruma sistemi
-})
+exchange = ccxt.kucoin({'enableRateLimit': True})
 
-# --- VERİ ÇEKME FONKSİYONLARI ---
-@st.cache_data(ttl=3600) # En yüksek hacimli coinleri saatte bir yenile
-def get_top_usdt_symbols(limit=50):
-    """Borsadaki en yüksek hacimli USDT paritelerini bulur."""
-    try:
-        tickers = exchange.fetch_tickers()
-        usdt_pairs = []
-        for symbol, ticker in tickers.items():
-            # Sadece USDT spot paritelerini al ve hacim verisi olanları filtrele
-            if symbol.endswith('/USDT') and ':' not in symbol and ticker.get('quoteVolume') is not None:
-                usdt_pairs.append({
-                    'symbol': symbol,
-                    'volume': ticker['quoteVolume']
-                })
-        
-        # Hacme göre büyükten küçüğe sırala ve en baştakileri al
-        df = pd.DataFrame(usdt_pairs)
-        df = df.sort_values(by='volume', ascending=False).head(limit)
-        return df['symbol'].tolist()
-    except Exception as e:
-        st.error(f"Sembol listesi çekilemedi: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+# --- ANALİZ MOTORU (MASTER 5 LOGIC) ---
+def apply_master_indicators(df):
+    """Tüm teknik göstergeleri ve formasyonları hesaplar."""
+    if df.empty or len(df) < 50:
+        return df
+    
+    # Hareketli Ortalamalar
+    df["EMA9"] = ta.ema(df["Close"], length=9)
+    df["EMA21"] = ta.ema(df["Close"], length=21)
+    df["SMA50"] = ta.sma(df["Close"], length=50)
+    df["SMA200"] = ta.sma(df["Close"], length=200)
+    
+    # Momentum ve Volatilite
+    df["RSI"] = ta.rsi(df["Close"], length=14)
+    macd = ta.macd(df["Close"])
+    df = pd.concat([df, macd], axis=1)
+    bbands = ta.bbands(df["Close"], length=20, std=2)
+    df = pd.concat([df, bbands], axis=1)
+    
+    # Özel Formasyon: Kanguru Kuyruğu (Kangaroo Tail) Tespiti
+    # Basit mantık: Mumun iğnesi gövdesinden en az 2 kat büyükse ve uç noktadaysa
+    df["Body"] = abs(df["Close"] - df["Open"])
+    df["Lower_Wick"] = df[["Open", "Close"]].min(axis=1) - df["Low"]
+    df["Upper_Wick"] = df["High"] - df[["Open", "Close"]].max(axis=1)
+    
+    df["Kangaroo_Bull"] = (df["Lower_Wick"] > (df["Body"] * 2.5)) & (df["RSI"] < 35)
+    df["Kangaroo_Bear"] = (df["Upper_Wick"] > (df["Body"] * 2.5)) & (df["RSI"] > 65)
+    
+    return df
 
-def fetch_data(symbol, timeframe="1d", limit=100):
-    """Tek bir coinin OHLCV mum verisini çeker."""
+@st.cache_data(ttl=300)
+def fetch_crypto_data(symbol, timeframe="1d", limit=200):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if not bars:
-            return pd.DataFrame()
         df = pd.DataFrame(bars, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
-        return df
-    except Exception as e:
+        return apply_master_indicators(df)
+    except:
         return pd.DataFrame()
 
-def analyze_symbol(symbol, timeframe):
-    """Screener için tek bir coini analiz edip özet metrikleri döndürür."""
-    df = fetch_data(symbol, timeframe, limit=100)
-    if df.empty or len(df) < 50:
-        return None
-    
-    # İndikatörleri hesapla
-    df["RSI_14"] = ta.rsi(df["Close"], length=14)
-    df["SMA_50"] = ta.sma(df["Close"], length=50)
-    
-    last_close = df["Close"].iloc[-1]
-    last_rsi = df["RSI_14"].iloc[-1]
-    last_sma = df["SMA_50"].iloc[-1]
-    
-    # RSI Sinyali
-    rsi_signal = "Nötr"
-    if last_rsi < 30:
-        rsi_signal = "Aşırı Satım (Alış Fırsatı) 🟢"
-    elif last_rsi > 70:
-        rsi_signal = "Aşırı Alım (Satış Riski) 🔴"
-        
-    # Trend Sinyali
-    trend = "Yükseliş ↗" if last_close > last_sma else "Düşüş ↘"
-    
-    return {
-        "Sembol": symbol,
-        "Fiyat": round(last_close, 4),
-        "RSI": round(last_rsi, 1),
-        "RSI Sinyali": rsi_signal,
-        "Trend (SMA 50)": trend
-    }
+@st.cache_data(ttl=3600)
+def get_market_symbols():
+    try:
+        tickers = exchange.fetch_tickers()
+        pairs = [s for s, t in tickers.items() if s.endswith('/USDT') and ':' not in s]
+        # Hacme göre sıralama yapılabilir, şimdilik popüler olanları başa alalım
+        prio = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "AVAX/USDT", "BNB/USDT"]
+        return prio + [p for p in pairs if p not in prio]
+    except:
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-# --- ARAYÜZ (SEKMELER) ---
-tab1, tab2 = st.tabs(["🔎 Tekil Analiz", "🌐 Toplu Tarama (Screener)"])
+# --- SEKMELER ---
+tab1, tab2 = st.tabs(["📊 Master Analiz", "🔍 Çoklu Tarayıcı (Screener)"])
 
 with tab1:
-    st.header("Detaylı Grafik ve Analiz")
-    col1, col2 = st.columns([1, 4])
+    col_s1, col_s2 = st.columns([1, 4])
+    with col_s1:
+        symbols = get_market_symbols()
+        selected_coin = st.selectbox("Sembol Seçin", symbols)
+        selected_tf = st.selectbox("Zaman Dilimi", ["15m", "1h", "4h", "1d", "1w"], index=3)
     
-    with col1:
-        top_coins = get_top_usdt_symbols(limit=100)
-        selected_symbol = st.selectbox("Coin Seç", top_coins, index=0)
-        selected_timeframe = st.selectbox("Zaman Dilimi", ["15m", "1h", "4h", "1d", "1w"], index=3)
+    df_ana = fetch_crypto_data(selected_coin, selected_tf)
     
-    with col2:
-        with st.spinner(f"{selected_symbol} grafiği yükleniyor..."):
-            df_single = fetch_data(selected_symbol, selected_timeframe, limit=150)
-            
-            if not df_single.empty:
-                df_single["SMA_50"] = ta.sma(df_single["Close"], length=50)
-                
-                # Plotly Grafiği
-                fig = go.Figure(data=[go.Candlestick(x=df_single.index,
-                                open=df_single['Open'], high=df_single['High'],
-                                low=df_single['Low'], close=df_single['Close'], name="Fiyat")])
-                fig.add_trace(go.Scatter(x=df_single.index, y=df_single['SMA_50'], name="SMA 50", line=dict(color='orange', width=2)))
-                fig.update_layout(height=600, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False, template="plotly_dark")
-                
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Veri çekilemedi. Başka bir zaman dilimi veya coin deneyin.")
+    if not df_ana.empty:
+        last = df_ana.iloc[-1]
+        
+        # Metrik Paneli
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Fiyat", f"{last['Close']:.4f}")
+        m2.metric("RSI (14)", f"{last['RSI']:.1f}")
+        m3.metric("Trend", "Yükseliş 🟢" if last['Close'] > last['SMA50'] else "Düşüş 🔴")
+        
+        # Sinyal Durumu
+        sig = "Nötr"
+        if last['Kangaroo_Bull']: sig = "KANGURU KUYRUĞU (AL) 🦘"
+        elif last['Kangaroo_Bear']: sig = "KANGURU KUYRUĞU (SAT) 🦘"
+        m4.metric("Özel Sinyal", sig)
+
+        # Gelişmiş Grafik
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=df_ana.index, open=df_ana['Open'], high=df_ana['High'], low=df_ana['Low'], close=df_ana['Close'], name="Fiyat"))
+        fig.add_trace(go.Scatter(x=df_ana.index, y=df_ana['EMA21'], name="EMA 21", line=dict(color='yellow', width=1)))
+        fig.add_trace(go.Scatter(x=df_ana.index, y=df_ana['SMA50'], name="SMA 50", line=dict(color='orange', width=1.5)))
+        fig.add_trace(go.Scatter(x=df_ana.index, y=df_ana['SMA200'], name="SMA 200", line=dict(color='red', width=2)))
+        
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.header("Piyasa Tarayıcısı")
-    st.markdown("En yüksek hacimli coinleri aynı anda tarar ve belirlediğin indikatörlere göre listeler.")
+    st.subheader("Master AI Piyasa Taraması")
+    scan_col1, scan_col2 = st.columns(2)
+    count = scan_col1.slider("Taranacak Coin Sayısı", 10, 100, 30)
+    stf = scan_col2.selectbox("Tarama Dilimi", ["1h", "4h", "1d"], index=2)
     
-    s_col1, s_col2, s_col3 = st.columns(3)
-    scan_limit = s_col1.slider("Kaç Coin Taranacak?", min_value=10, max_value=100, value=30, step=10)
-    scan_timeframe = s_col2.selectbox("Tarama Zaman Dilimi", ["15m", "1h", "4h", "1d"], index=3)
-    
-    if st.button("🚀 Tarayıcıyı Çalıştır"):
-        scan_symbols = get_top_usdt_symbols(limit=scan_limit)
+    if st.button("🚀 Piyasayı Tara"):
+        all_symbols = get_market_symbols()[:count]
         results = []
+        progress = st.progress(0)
         
-        # İlerleme çubuğu (Progress bar)
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Hız sınırlarına takılmamak ve hızlı sonuç almak için ThreadPool (Paralel İşlem)
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_symbol = {executor.submit(analyze_symbol, sym, scan_timeframe): sym for sym in scan_symbols}
-            completed = 0
-            
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                completed += 1
-                progress_bar.progress(completed / len(scan_symbols))
-                status_text.text(f"Taranıyor: %{int((completed / len(scan_symbols)) * 100)} tamamlandı.")
-                
-                res = future.result()
-                if res:
-                    results.append(res)
-                
-                # API limitlerini korumak için çok hafif bir fren
+            future_to_coin = {executor.submit(fetch_crypto_data, coin, stf): coin for coin in all_symbols}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_coin)):
+                coin = future_to_coin[future]
+                df_res = future.result()
+                if not df_res.empty:
+                    last_r = df_res.iloc[-1]
+                    results.append({
+                        "Sembol": coin,
+                        "Fiyat": last_r["Close"],
+                        "RSI": round(last_r["RSI"], 2),
+                        "EMA 21/50": "Üstünde" if last_r["Close"] > last_r["SMA50"] else "Altında",
+                        "Kangaroo": "AL 🦘" if last_r["Kangaroo_Bull"] else ("SAT 🦘" if last_r["Kangaroo_Bear"] else "-")
+                    })
+                progress.progress((i + 1) / len(all_symbols))
                 time.sleep(0.05)
-                
-        status_text.empty() # İşlem bitince yazıyı sil
         
-        if results:
-            df_results = pd.DataFrame(results)
-            
-            # Sonuçları DataFrame olarak göster
-            st.success("Tarama Tamamlandı!")
-            
-            # Sadece aşırı satım olanları öne çıkarma butonu
-            if st.checkbox("Sadece Aşırı Satımda Olanları (RSI < 30) Göster"):
-                df_results = df_results[df_results["RSI"] < 30]
-                if df_results.empty:
-                    st.info("Şu an RSI'ı 30'un altında olan coin bulunmuyor.")
-            
-            st.dataframe(df_results, use_container_width=True)
-        else:
-            st.error("Tarama sonucunda veri bulunamadı.")
+        st.dataframe(pd.DataFrame(results), use_container_width=True)
