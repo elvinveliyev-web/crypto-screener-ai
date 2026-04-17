@@ -1246,7 +1246,6 @@ with st.sidebar:
     st.header("1) Piyasa & Sembol")
     ticker = st.selectbox("Kripto Parite Seçin", get_crypto_universe(), index=0)
 
-    # YENİ GELİŞTİRME: Zaman Makinesi (Geçmiş Tarihe/Saate Göre Analiz)
     st.subheader("⏱️ Zaman Makinesi (Geçmiş Analiz)")
     use_timemachine = st.checkbox("Geçmiş bir tarihe/saate göre analiz yap", value=False, help="Örn: Dün gece 00:00 itibarıyla günlük ve haftalık kapanışa göre analiz yapmak için.")
     if use_timemachine:
@@ -1387,7 +1386,6 @@ benchmark_returns = benchmark_df["Close"].pct_change().dropna() if not benchmark
 df, checkpoints = signal_with_checkpoints(df, cfg, market_filter_series=market_filter_series, higher_tf_filter_series=higher_tf_filter_series)
 latest = df.iloc[-1]
 
-# Zaman makinesi devredeyse 'Canlı Fiyat' değil, o anki geçmiş 'Kapanış' fiyatını baz alıyoruz.
 if use_timemachine:
     live_price = float(latest["Close"])
 else:
@@ -2181,12 +2179,42 @@ with tab_screener:
     if use_timemachine:
         st.warning(f"Zaman Makinesi Aktif: Tarama **{target_datetime}** verileri baz alınarak yapılacaktır.")
 
+    # YENİ EKLENEN KISIM: Midas Listesi Entegrasyonu
+    st.subheader("📋 Tarama Listesi Ayarları")
+    scan_source = st.radio(
+        "Hangi coinler taransın?",
+        ["Midas Kripto (Sadece Midas'ta olan coinler)", "Tüm Piyasa (KuCoin)", "Özel Listem"],
+        help="Taramak istediğiniz coin havuzunu seçin. Midas Kripto seçeneği, Midas borsasında listelenen popüler coinleri kapsar."
+    )
+
+    custom_tickers_input = ""
+    if scan_source == "Özel Listem":
+        custom_tickers_input = st.text_area(
+            "Sadece Kendi Coinlerimi Tara",
+            placeholder="Örn: BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT",
+            help="Aralarına virgül koyarak yazın."
+        )
+
     sc_col1, sc_col2 = st.columns(2)
-    scan_count = sc_col1.slider("Taranacak Coin Sayısı (Hıza etki eder)", 10, 150, 30, step=10)
+    scan_count = sc_col1.slider("Taranacak Maksimum Coin Sayısı", 10, 250, 50, step=10)
     scan_tf = sc_col2.selectbox("Tarama Periyodu", ["1h", "4h", "1d"], index=2)
     
     if st.button("🚀 Kapsamlı Taramayı Başlat"):
-        all_coins = get_crypto_universe()[:scan_count]
+        kucoin_universe = get_crypto_universe()
+
+        if scan_source == "Özel Listem" and custom_tickers_input.strip():
+            raw_list = custom_tickers_input.replace("\n", ",").split(",")
+            all_coins = [c.strip().upper() for c in raw_list if c.strip()]
+            all_coins = [c if "/" in c else f"{c}/USDT" for c in all_coins]
+            all_coins = list(dict.fromkeys(all_coins)) 
+        elif scan_source == "Midas Kripto":
+            midas_tickers = ["BTC", "ETH", "XRP", "BNB", "USDC", "SOL", "TRX", "DOGE", "HYPE", "ADA", "BCH", "LINK", "XLM", "RAVE", "LTC", "AVAX", "PYUSD", "SUI", "HBAR", "SHIB", "TON", "CRO", "TAO", "XAUT", "WLFI", "PAXG", "MNT", "DOT", "UNI", "NEAR", "PI", "SKY", "OKB", "AAVE", "ASTR", "PEPE", "ICP", "ONDO", "ENA", "DEXE", "ALGO", "KAS", "RNDR", "POL", "QNT", "ATOM", "WLD", "APT", "ARB", "MORPHO", "FIL", "FLR", "PUMP", "JUP", "VET", "ZRO", "XDC", "NEXO", "BONK", "FET", "CAKE", "VIRTUAL", "PUDGY", "SIREN", "STX", "ETHFI", "CHZ", "VVV", "SEI", "AERO", "CELIA", "CRV", "H", "LDO", "SPX", "IMX", "CFX", "INJ", "GNO", "KAIA", "BTT", "2Z", "FLOKI", "JASMY", "OP", "SYRUP", "THE", "PYTH", "IOTA", "KITE", "LIT", "COMP", "PENDLE", "XPL", "STRK", "FARTCOIN", "WIF", "IP", "NEO", "THETA", "AXS", "VSN", "MANA", "RAY", "TWT", "XCN", "FF", "WAL", "ZK", "CALA", "JTO", "EIGEN", "1INCH", "S", "EGLD", "AR", "0G", "CFG", "ORDI", "ENJ", "SENT", "KAITO", "DYDX", "LPT", "QUBIC", "COW", "BERA", "BEAT", "ZEN", "SNX", "BEAM", "QTUM", "BARD", "GRASS", "SKR", "ROSE", "KSM", "ZETA", "TURBO", "SUPER", "TOSHI", "MINA", "APE", "CKB", "AMP", "BRETT", "MET", "HOT", "FOGO", "RON", "W", "SAHARA", "HOME", "BLUR", "ZORA", "NMR", "PNUT", "COAI", "AXL", "PLUME", "ACH", "SUSHI", "BIO", "MOG", "ORCA", "MOODENG", "MEW", "TRB", "LINEA", "ANKR", "HUMA", "MAGIC", "REDSTONE", "ROBO", "CSPR", "MASK", "SKL", "STORJ", "VANA", "MERL", "COTI", "NEIRO", "G", "UMA", "NOT", "GOPLUS", "SOMI", "AUDIO", "IO", "GMT", "BOME", "SOLAYER", "MEME", "CYBER", "OPEN", "CORE", "ARKA", "AUCTION", "REZ", "CTSI", "OM", "STEEM", "PHA", "BREV", "ACROSS", "METIS", "NAORIS", "ARIA", "BB", "AIXBT", "SPELL", "BASED", "ARKM", "ANIME", "OPN", "API3", "WET", "USUAL", "SXT", "AEVO", "KERNEL", "ORDER", "ZKC", "WCT", "KAT", "ALLO", "QANX", "CETUS", "XAI", "TNSR", "CATI", "VINE", "RARE", "ENSO", "GOAT", "DEGEN", "DOGS", "NEWT", "INIT", "OGN", "ARPA", "LUMIA", "ACT", "RAD", "PSG", "PORTO", "VANRY", "BAR", "MYSHELL", "ASR", "TREE", "HMSTR", "BMT", "DYM", "SAGA", "BEL", "ATM", "LAZIO", "SCR", "CITY", "JUV", "TRU", "SOLV", "EDEN", "ZEUS", "ELIZA", "PRCL", "ACM", "EURT", "ACA", "MOVE", "BAKE", "SELF", "BELIEVE", "TROY", "BNX", "OMNI", "EOS"]
+            midas_coins = [f"{c}/USDT" for c in midas_tickers]
+            # Sadece KuCoin'de gerçekten var olanları tut (Hata almamak için)
+            all_coins = [c for c in midas_coins if c in kucoin_universe][:scan_count]
+        else:
+            all_coins = kucoin_universe[:scan_count]
+
         results = []
         progress_bar = st.progress(0)
         status = st.empty()
@@ -2281,4 +2309,4 @@ with tab_screener:
             st.success(f"✅ {len(results)} coin başarıyla tarandı ve detaylı puanlandı!")
             st.dataframe(df_results, use_container_width=True, height=600)
         else:
-            st.error("Tarama başarısız oldu. API limitine (Rate limit) takılmış olabilirsiniz, 1 dakika bekleyip tekrar deneyin.")
+            st.error("Tarama başarısız oldu. API limitine (Rate limit) takılmış olabilirsiniz, veya girdiğiniz pariteler (örn. XYZ/USDT) borsada bulunmuyor olabilir. Lütfen kontrol edip 1 dakika sonra tekrar deneyin.")
