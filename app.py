@@ -404,6 +404,10 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 # Cached data loader (Zaman Makinesi Uyarlamalı)
 # =============================
 @st.cache_data(ttl=300, show_spinner=False)
+# =============================
+# Cached data loader (Rate Limit Dirençli)
+# =============================
+@st.cache_data(ttl=300, show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str, target_dt: pd.Timestamp = None, force_latest: bool = False) -> pd.DataFrame:
     tf_map = {"1m": "1m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d", "1wk": "1w"}
     ccxt_tf = tf_map.get(interval, "1d")
@@ -425,23 +429,30 @@ def load_data_cached(ticker: str, period: str, interval: str, target_dt: pd.Time
     if target_dt is not None:
         mins_map = {"1m": 1, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
         mins = mins_map.get(ccxt_tf, 1440)
-        # Hedef tarihe kadar olan veriyi alabilmek için geriden başlıyoruz
         since_dt = target_dt - pd.Timedelta(minutes=mins * 1500)
         since_ms = int(since_dt.timestamp() * 1000)
 
-    try:
-        bars = exchange.fetch_ohlcv(ticker, timeframe=ccxt_tf, limit=1500, since=since_ms)
-        df = pd.DataFrame(bars, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        df.set_index("timestamp", inplace=True)
-        
-        if target_dt is not None:
-            # Sadece hedef tarihe kadar olanları filtrele
-            df = df[df.index <= target_dt]
+    # RATE LIMIT DİRENCİ: 3 kez tekrar deneme mantığı
+    for attempt in range(3):
+        try:
+            bars = exchange.fetch_ohlcv(ticker, timeframe=ccxt_tf, limit=1500, since=since_ms)
+            df = pd.DataFrame(bars, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("timestamp", inplace=True)
             
-        return df
-    except Exception:
-        return pd.DataFrame()
+            if target_dt is not None:
+                df = df[df.index <= target_dt]
+                
+            return df
+        except ccxt.RateLimitExceeded:
+            # KuCoin IP'mizi engellediyse 3 saniye dur ve tekrar dene
+            time.sleep(3)
+        except Exception:
+            # Başka bir ağ hatasıysa 1 saniye bekle
+            time.sleep(1)
+            
+    # 3 denemede de başarısız olursa boş döndür
+    return pd.DataFrame()
 
 # =============================
 # Market regime filters
@@ -2348,8 +2359,9 @@ with tab_screener:
             except Exception:
                 return []
 
-        # Bu kısmı eski kodundaki ThreadPoolExecutor bloğu ile değiştir
-        with ThreadPoolExecutor(max_workers=2) as executor:  # 5 yerine 2 yaptık, API'yi yormamak için
+        
+        # Çoklu işlemci yerine tek tek (sırayla) çekeceğiz ki KuCoin kızmasın
+        with ThreadPoolExecutor(max_workers=1) as executor: 
             future_to_coin = {executor.submit(scan_single_coin, coin): coin for coin in all_coins}
             
             for i, future in enumerate(as_completed(future_to_coin)):
@@ -2358,11 +2370,10 @@ with tab_screener:
                 if res_list: results.extend(res_list)
                 
                 progress_bar.progress((i + 1) / len(all_coins))
-                status.text(f"Taranıyor (1D + 1H): {coin_name} | API dinlendiriliyor...")
+                status.text(f"Taranıyor (1D + 1H): {coin_name} | {i+1}/{len(all_coins)} tamamlandı.")
                 
-                # KuCoin Rate Limit'e takılmamak için her döngüde yarım saniye bekle
-                time.sleep(0.5) 
-        
+                # Her coinden sonra kesinlikle 1.5 saniye nefes al!
+                time.sleep(1.5)
         status.empty()
         if results:
             df_results = pd.DataFrame(results)
