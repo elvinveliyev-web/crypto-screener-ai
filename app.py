@@ -874,15 +874,26 @@ def get_period_rules(period_key: str) -> Tuple[str, str]:
 
 
 def build_period_ohlcv_from_daily(symbol: str, period_key: str, anchor_dt) -> pd.DataFrame:
-    daily = load_daily_history_cached(symbol, target_dt=anchor_dt, limit=1500)
+    # Aylık taramada bazı varlıklarda veri sınırı çok sıkı kalabiliyor.
+    # Bu yüzden üst periyotlarda biraz daha geniş günlük tarihçe çekiyoruz.
+    history_limit = 1500
+    if period_key == "weekly":
+        history_limit = 1800
+    elif period_key == "monthly":
+        history_limit = 2200
+
+    daily = load_daily_history_cached(symbol, target_dt=anchor_dt, limit=history_limit)
     if daily.empty:
         return pd.DataFrame()
+
     base_rule, _ = get_period_rules(period_key)
     if base_rule == "D":
         out = daily.copy()
     else:
         out = resample_ohlcv(daily, base_rule)
+
     out = out[out.index <= pd.Timestamp(anchor_dt)]
+    out = out.dropna(subset=["Open", "High", "Low", "Close"])
     return out
 
 
@@ -921,13 +932,27 @@ def evaluate_symbol_for_closed_period_screener(symbol: str, period_key: str, cfg
     local_cfg["score_entry_threshold"] = 70
 
     period_df = build_period_ohlcv_from_daily(symbol, period_key, anchor_dt)
-    min_bars = {"daily": 120, "weekly": 52, "monthly": 24}.get(period_key, 60)
+
+    # Aylık/haftalık taramada veri şartını biraz esnetiyoruz.
+    # Amaç: yeni listelenmiş varlıkları tamamen elememek.
+    min_bars = {"daily": 90, "weekly": 26, "monthly": 10}.get(period_key, 60)
     if period_df.empty or len(period_df) < min_bars:
         return None
 
     feat = build_features(period_df, local_cfg)
-    market_filter_series = build_market_filter_series_for_period(period_key, anchor_dt, local_cfg) if use_btc_filter else None
-    higher_tf_filter_series = build_higher_tf_filter_series(symbol, period_key, anchor_dt, local_cfg) if use_higher_tf_filter else None
+    if feat.empty or len(feat) == 0:
+        return None
+
+    try:
+        market_filter_series = build_market_filter_series_for_period(period_key, anchor_dt, local_cfg) if use_btc_filter else None
+    except Exception:
+        market_filter_series = None
+
+    try:
+        higher_tf_filter_series = build_higher_tf_filter_series(symbol, period_key, anchor_dt, local_cfg) if use_higher_tf_filter else None
+    except Exception:
+        higher_tf_filter_series = None
+
     feat, cp = signal_with_checkpoints(feat, local_cfg, market_filter_series=market_filter_series, higher_tf_filter_series=higher_tf_filter_series)
 
     if f"RSI > {local_cfg['rsi_entry_level']}" in cp:
@@ -945,6 +970,9 @@ def evaluate_symbol_for_closed_period_screener(symbol: str, period_key: str, cfg
     else:
         status = "İZLE"
 
+    vol_sma_val = float(last["VOL_SMA"]) if pd.notna(last.get("VOL_SMA", np.nan)) else np.nan
+    volume_state = "Yüksek 🟢" if np.isfinite(vol_sma_val) and float(last["Volume"]) > vol_sma_val else "Düşük 🔴"
+
     return {
         "Sembol": symbol,
         "Durum": status,
@@ -955,7 +983,7 @@ def evaluate_symbol_for_closed_period_screener(symbol: str, period_key: str, cfg
         "RSI": round(float(last["RSI"]), 2),
         "ADX": round(float(last["ADX"]), 2),
         "MACD Hist": "Pozitif 🟢" if float(last["MACD_hist"]) > 0 else "Negatif 🔴",
-        "Hacim": "Yüksek 🟢" if float(last["Volume"]) > float(last["VOL_SMA"]) else "Düşük 🔴",
+        "Hacim": volume_state,
         "Trend": "Yukarı 🟢" if bool(cp.get("Trend (Close>EMA50>EMA200)", False)) else "Zayıf 🔴",
         "Dirence Yakın": "Hayır 🟢" if bool(cp.get("Dirence çok yakın değil", False)) else "Evet 🔴",
         "Spekülasyon Filtresi": "Uygun 🟢" if bool(cp.get("Spekülasyon filtresi uygun", False)) else "Sıcak 🔴",
@@ -990,6 +1018,8 @@ def render_closed_period_screener(tab_ref, title: str, period_key: str, anchor_d
         if st.button(f"🚀 {title} Çalıştır", key=f"run_{period_key}_screener"):
             all_symbols = resolve_scan_universe(scan_source, custom_input, scan_count)
             results = []
+            skipped_count = 0
+            error_samples = []
             progress_bar = st.progress(0)
             status_box = st.empty()
 
@@ -1006,15 +1036,23 @@ def render_closed_period_screener(tab_ref, title: str, period_key: str, anchor_d
                     )
                     if row is not None:
                         results.append(row)
-                except Exception:
-                    pass
+                    else:
+                        skipped_count += 1
+                except Exception as e:
+                    skipped_count += 1
+                    if len(error_samples) < 5:
+                        error_samples.append(f"{symbol}: {type(e).__name__}: {str(e)}")
                 progress_bar.progress((i + 1) / len(all_symbols))
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             status_box.empty()
 
             if not results:
-                st.error("Tarama başarısız oldu veya yeterli veri bulunamadı.")
+                st.error("Tarama sonucu üretilemedi. Büyük olasılıkla seçilen evrendeki varlıkların çoğunda yeterli kapanmış dönem verisi yok.")
+                st.info(f"Taranan varlık: {len(all_symbols)} | Sonuç üreten: 0 | Atlanan/Hatalı: {skipped_count}")
+                if error_samples:
+                    st.caption("Örnek hata kayıtları:")
+                    st.code("\n".join(error_samples))
                 return
 
             df_results = pd.DataFrame(results).sort_values(by=["Skor (100)", "RSI", "ADX"], ascending=[False, False, False]).reset_index(drop=True)
@@ -1925,21 +1963,20 @@ else:
     live = get_live_price(ticker)
     live_price = live.get("last_price", np.nan)
 
+if auto_plan["Action"] == "AL":
+    rec = "AL"
+elif int(latest["EXIT"]) == 1:
+    rec = "SAT"
+elif auto_plan["Action"] == "İZLE":
+    rec = "İZLE"
+else:
+    rec = "UZAK DUR"
+
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=0.0, benchmark_returns=benchmark_returns)
 tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 overbought_result = detect_speculation(df)
 auto_plan = build_auto_trade_plan(ticker, df, latest, tp, rr_info, cfg)
-
-action = auto_plan.get("Action", "UZAK DUR") if isinstance(auto_plan, dict) else "UZAK DUR"
-if action == "AL":
-    rec = "AL"
-elif int(latest["EXIT"]) == 1:
-    rec = "SAT"
-elif action == "İZLE":
-    rec = "İZLE"
-else:
-    rec = "UZAK DUR"
 
 # =============================
 # Build figures
