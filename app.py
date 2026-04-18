@@ -1247,7 +1247,7 @@ with st.sidebar:
     use_timemachine = st.checkbox("Geçmiş bir tarihe/saate göre analiz yap", value=False, help="Örn: Dün gece 00:00 itibarıyla günlük ve haftalık kapanışa göre analiz yapmak için.")
     if use_timemachine:
         hist_d = st.date_input("Tarih", datetime.date.today())
-        hist_t = st.time_input("Saat", datetime.time(0, 0))
+        hist_t = st.time_input("Saat", datetime.time(0, 0), step=60)
         target_datetime = pd.to_datetime(f"{hist_d} {hist_t}")
         st.warning(f"Analiz Hedefi:\n**{target_datetime}**")
     else:
