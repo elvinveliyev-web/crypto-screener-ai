@@ -401,7 +401,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 # =============================
-# Cached data loader (API Kısıtlamalarına Dirençli Versiyon)
+# Cached data loader (Zaman Makinesi Uyarlamalı)
 # =============================
 @st.cache_data(ttl=300, show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str, target_dt: pd.Timestamp = None, force_latest: bool = False) -> pd.DataFrame:
@@ -425,28 +425,23 @@ def load_data_cached(ticker: str, period: str, interval: str, target_dt: pd.Time
     if target_dt is not None:
         mins_map = {"1m": 1, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
         mins = mins_map.get(ccxt_tf, 1440)
+        # Hedef tarihe kadar olan veriyi alabilmek için geriden başlıyoruz
         since_dt = target_dt - pd.Timedelta(minutes=mins * 1500)
         since_ms = int(since_dt.timestamp() * 1000)
 
-    # API Limitlerine takılmamak için 3 denemeli retry mekanizması eklendi
-    for attempt in range(3):
-        try:
-            bars = exchange.fetch_ohlcv(ticker, timeframe=ccxt_tf, limit=limit, since=since_ms)
-            df = pd.DataFrame(bars, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df.set_index("timestamp", inplace=True)
+    try:
+        bars = exchange.fetch_ohlcv(ticker, timeframe=ccxt_tf, limit=1500, since=since_ms)
+        df = pd.DataFrame(bars, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        
+        if target_dt is not None:
+            # Sadece hedef tarihe kadar olanları filtrele
+            df = df[df.index <= target_dt]
             
-            if target_dt is not None:
-                # Sadece hedef tarihe kadar olanları filtrele
-                df = df[df.index <= target_dt]
-                
-            return df
-        except Exception as e:
-            # Hata alınırsa (rate limit vb.) 1.5 saniye bekleyip tekrar dener
-            time.sleep(1.5)
-            
-    # Tüm denemeler başarısız olursa boş döner
-    return pd.DataFrame()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 # =============================
 # Market regime filters
@@ -2178,30 +2173,33 @@ with tab_triple:
 # YENİ EKLENEN 5. SEKME: GELİŞMİŞ ÇOKLU TARAYICI (SCREENER)
 # =============================
 with tab_screener:
-    st.header("🔍 Gelişmiş Çoklu Kripto Tarayıcı (1D + 1H Kombine & Günlük Uyumsuzluklar)")
-    st.markdown("Seçilen coinler için hem dünün kapanışı (1D) hem de anlık saatlik (1H) verilerini tarar. Hızlı çalışması ve rate limit aşmaması için haftalık tarama devreden çıkarılmıştır.")
+    st.header("🔍 Gelişmiş Çoklu Kripto Tarayıcı (AI Destekli Skorlama)")
+    st.markdown("Onlarca coini; RSI, MACD, StochRSI, ADX, Bollinger, Hacim, OBV ve Formasyonlara göre analiz edip 100 üzerinden skorlar.")
     
     if use_timemachine:
         st.warning(f"Zaman Makinesi Aktif: Tarama **{target_datetime}** verileri baz alınarak yapılacaktır.")
 
+    # YENİ EKLENEN KISIM: Midas Listesi Entegrasyonu
     st.subheader("📋 Tarama Listesi Ayarları")
     scan_source = st.radio(
         "Hangi coinler taransın?",
         ["Midas Kripto (Sadece Midas'ta olan coinler)", "Tüm Piyasa (KuCoin)", "Özel Listem"],
-        help="Midas Kripto listesi sistem içine gömülmüştür."
+        help="Taramak istediğiniz coin havuzunu seçin. Midas Kripto seçeneği, Midas borsasında listelenen popüler coinleri kapsar."
     )
 
     custom_tickers_input = ""
     if scan_source == "Özel Listem":
         custom_tickers_input = st.text_area(
             "Sadece Kendi Coinlerimi Tara",
-            placeholder="Örn: BTC/USDT, ETH/USDT, SOL/USDT",
+            placeholder="Örn: BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT",
             help="Aralarına virgül koyarak yazın."
         )
 
-    scan_count = st.slider("Taranacak Maksimum Coin Sayısı (Yüksek sayı biraz zaman alabilir)", 10, 250, 50, step=10)
+    sc_col1, sc_col2 = st.columns(2)
+    scan_count = sc_col1.slider("Taranacak Maksimum Coin Sayısı", 10, 250, 50, step=10)
+    scan_tf = sc_col2.selectbox("Tarama Periyodu", ["1h", "4h", "1d"], index=2)
     
-    if st.button("🚀 Kombine Kapsamlı Taramayı Başlat (1D + 1H)"):
+    if st.button("🚀 Kapsamlı Taramayı Başlat"):
         kucoin_universe = get_crypto_universe()
 
         if scan_source == "Özel Listem" and custom_tickers_input.strip():
@@ -2239,6 +2237,7 @@ with tab_screener:
                 "VIRTUAL", "VSN", "WAL", "WLFI", "WLD", "W", "XAI", "ZETA", "ZEUS", "ZK", "ZORA"
             ]
             midas_coins = [f"{c}/USDT" for c in midas_tickers]
+            # Sadece KuCoin'de gerçekten var olanları tut (Hata almamak için)
             all_coins = [c for c in midas_coins if c in kucoin_universe][:scan_count]
         else:
             all_coins = kucoin_universe[:scan_count]
@@ -2246,127 +2245,95 @@ with tab_screener:
         results = []
         progress_bar = st.progress(0)
         status = st.empty()
-
-        if target_datetime:
-            cutoff_1d = target_datetime.floor('D')
-            cutoff_1h = target_datetime
-        else:
-            cutoff_1d = pd.Timestamp.now(tz="UTC").floor('D')
-            cutoff_1h = None
-
-        def get_score_and_row(coin, d_feat, tf_label, d_div_str):
-            last_row = d_feat.iloc[-1]
-            score = 0
-            
-            if last_row["Close"] > last_row["EMA200"]: score += 10
-            if last_row["EMA50"] > last_row["EMA200"]: score += 10
-            
-            rsi_val = last_row["RSI"]
-            if 50 < rsi_val < 70: score += 10
-            elif rsi_val <= 30: score += 15 
-            
-            if last_row["MACD_hist"] > 0: score += 10
-            
-            if last_row["ADX"] > 25 and last_row["PLUS_DI"] > last_row["MINUS_DI"]: score += 15
-            
-            if last_row["STOCH_K"] > last_row["STOCH_D"] and last_row["STOCH_K"] < 80: score += 10
-            
-            if last_row["Close"] > last_row["BB_mid"]: score += 5
-            if last_row["BB_WIDTH"] < 0.10: score += 5 
-            
-            if last_row["OBV"] > last_row.get("OBV_EMA", last_row["OBV"]): score += 5
-            if last_row["Volume"] > last_row.get("VOL_SMA", 0): score += 5
-            
-            bull_patterns = ["KANGAROO_BULL", "PATTERN_ENGULFING_BULL", "PATTERN_HAMMER", "PATTERN_MORNING_STAR", "PATTERN_PIERCING", "PATTERN_MARUBOZU_BULL"]
-            bear_patterns = ["KANGAROO_BEAR", "PATTERN_ENGULFING_BEAR", "PATTERN_SHOOTING_STAR", "PATTERN_EVENING_STAR", "PATTERN_DARK_CLOUD", "PATTERN_MARUBOZU_BEAR"]
-            
-            has_bull = any(last_row.get(p, 0) == 1 for p in bull_patterns)
-            has_bear = any(last_row.get(p, 0) == 1 for p in bear_patterns)
-            
-            if has_bull: score += 10
-            if has_bear: score -= 15
-            
-            score = max(0, min(100, score))
-            
-            return {
-                "Periyot": tf_label,
-                "Sembol": coin,
-                "Fiyat": f"{last_row['Close']:.4f}",
-                "Skor (100)": score,
-                "Durum": "Güçlü Al 🚀" if score >= 80 else ("Al 🟢" if score >= 60 else ("Nötr ⚪" if score >= 40 else "Sat 🔴")),
-                "RSI": round(rsi_val, 2),
-                "MACD Hist": "Pozitif 🟢" if last_row["MACD_hist"] > 0 else "Negatif 🔴",
-                "ADX Trend": "Güçlü Boğa 🟢" if (last_row["ADX"] > 25 and last_row["PLUS_DI"] > last_row["MINUS_DI"]) else ("Güçlü Ayı 🔴" if last_row["ADX"] > 25 else "Zayıf/Yatay ⚪"),
-                "StochRSI": "Alışta 🟢" if (last_row["STOCH_K"] > last_row["STOCH_D"] and last_row["STOCH_K"] < 80) else "Satış/Aşırı 🔴",
-                "BB Genişlik": f"%{last_row['BB_WIDTH']*100:.1f}",
-                "Hacim": "Yüksek 🟢" if last_row["Volume"] > last_row["VOL_SMA"] else "Düşük 🔴",
-                "Formasyon": "Boğa 🟢" if has_bull else ("Ayı 🔴" if has_bear else "-"),
-                "1D Uyumsuzluk (RSI/Stoch)": d_div_str
-            }
-
+        
         def scan_single_coin(coin):
             try:
-                # 1D verisini çek ve API'yi yormamak için kısa bir mola ver
-                df_1d = load_data_cached(coin, "1y", "1d", cutoff_1d)
-                if df_1d.empty or len(df_1d) < 30: return []
-                time.sleep(0.2) 
-
-                # 1H verisini çek
-                df_1h = load_data_cached(coin, "60d", "1h", cutoff_1h)
-                if df_1h.empty or len(df_1h) < 30: return []
-                time.sleep(0.2)
-
-                # Günlük Uyumsuzluk Hesapla (RSI ve Stoch)
-                rsi_1d = rsi(df_1d["Close"], 13)
-                bull_rsi, a_rsi = check_bullish_divergence(df_1d["Close"], rsi_1d)
-                bear_rsi, b_rsi = check_bearish_divergence(df_1d["Close"], rsi_1d)
+                # 200 EMA ve diğer göstergeler için yeterli data çekiyoruz
+                d = load_data_cached(coin, "1y", scan_tf, target_datetime) 
+                if d.empty or len(d) < 50: return None
                 
-                stoch_k, _ = stochastic(df_1d["High"], df_1d["Low"], df_1d["Close"])
-                bull_st, a_st = check_bullish_divergence(df_1d["Close"], stoch_k)
-                bear_st, b_st = check_bearish_divergence(df_1d["Close"], stoch_k)
+                d = build_features(d, cfg) 
+                last_row = d.iloc[-1]
                 
-                d_divs = []
-                if bull_rsi: d_divs.append(f"RSI Poz 🟢 ({a_rsi}b)")
-                if bear_rsi: d_divs.append(f"RSI Neg 🔴 ({b_rsi}b)")
-                if bull_st: d_divs.append(f"Stoch Poz 🟢 ({a_st}b)")
-                if bear_st: d_divs.append(f"Stoch Neg 🔴 ({b_st}b)")
-                d_div_str = ", ".join(d_divs) if d_divs else "-"
-
-                # Özellikleri hesapla ve puanla
-                feat_1d = build_features(df_1d, cfg)
-                feat_1h = build_features(df_1h, cfg)
-
-                row_1d = get_score_and_row(coin, feat_1d, "1D", d_div_str)
-                row_1h = get_score_and_row(coin, feat_1h, "1H", d_div_str)
-
-                return [row_1d, row_1h]
-
+                # --- KOMPLEKS SKORLAMA (Max 100) ---
+                score = 0
+                
+                # Trend (Max 20)
+                if last_row["Close"] > last_row["EMA200"]: score += 10
+                if last_row["EMA50"] > last_row["EMA200"]: score += 10
+                
+                # RSI (Max 15)
+                rsi_val = last_row["RSI"]
+                if 50 < rsi_val < 70: score += 10
+                elif rsi_val <= 30: score += 15 # Aşırı satım (dip) fırsatı
+                
+                # MACD (Max 10)
+                if last_row["MACD_hist"] > 0: score += 10
+                
+                # ADX (Max 15)
+                if last_row["ADX"] > 25 and last_row["PLUS_DI"] > last_row["MINUS_DI"]: score += 15
+                
+                # Stochastic RSI (Max 10)
+                if last_row["STOCH_K"] > last_row["STOCH_D"] and last_row["STOCH_K"] < 80: score += 10
+                
+                # Bollinger (Max 10)
+                if last_row["Close"] > last_row["BB_mid"]: score += 5
+                if last_row["BB_WIDTH"] < 0.10: score += 5 # Squeeze (sıkışma patlama potansiyeli)
+                
+                # OBV & Hacim (Max 10)
+                if last_row["OBV"] > last_row.get("OBV_EMA", last_row["OBV"]): score += 5
+                if last_row["Volume"] > last_row.get("VOL_SMA", 0): score += 5
+                
+                # Mum Formasyonları (Max +10 / Min -15)
+                bull_patterns = ["KANGAROO_BULL", "PATTERN_ENGULFING_BULL", "PATTERN_HAMMER", "PATTERN_MORNING_STAR", "PATTERN_PIERCING", "PATTERN_MARUBOZU_BULL"]
+                bear_patterns = ["KANGAROO_BEAR", "PATTERN_ENGULFING_BEAR", "PATTERN_SHOOTING_STAR", "PATTERN_EVENING_STAR", "PATTERN_DARK_CLOUD", "PATTERN_MARUBOZU_BEAR"]
+                
+                has_bull = any(last_row.get(p, 0) == 1 for p in bull_patterns)
+                has_bear = any(last_row.get(p, 0) == 1 for p in bear_patterns)
+                
+                if has_bull: score += 10
+                if has_bear: score -= 15
+                
+                # Puanı 0-100 arasına sabitle
+                score = max(0, min(100, score))
+                
+                # Tablo Görselleştirme Hazırlığı
+                return {
+                    "Sembol": coin,
+                    "Fiyat": f"{last_row['Close']:.4f}",
+                    "Skor (100)": score,
+                    "Durum": "Güçlü Al 🚀" if score >= 80 else ("Al 🟢" if score >= 60 else ("Nötr ⚪" if score >= 40 else "Sat 🔴")),
+                    "RSI": round(rsi_val, 2),
+                    "MACD Hist": "Pozitif 🟢" if last_row["MACD_hist"] > 0 else "Negatif 🔴",
+                    "ADX Trend": "Güçlü Boğa 🟢" if (last_row["ADX"] > 25 and last_row["PLUS_DI"] > last_row["MINUS_DI"]) else ("Güçlü Ayı 🔴" if last_row["ADX"] > 25 else "Zayıf/Yatay ⚪"),
+                    "StochRSI": "Alışta 🟢" if (last_row["STOCH_K"] > last_row["STOCH_D"] and last_row["STOCH_K"] < 80) else "Satış/Aşırı 🔴",
+                    "BB Genişlik": f"%{last_row['BB_WIDTH']*100:.1f}",
+                    "Hacim": "Yüksek 🟢" if last_row["Volume"] > last_row["VOL_SMA"] else "Düşük 🔴",
+                    "OBV": "Pozitif 🟢" if last_row["OBV"] > last_row["OBV_EMA"] else "Negatif 🔴",
+                    "Formasyon": "Boğa 🟢" if has_bull else ("Ayı 🔴" if has_bear else "-")
+                }
             except Exception:
-                return []
+                return None
 
-        # Thread sayısını 2 ile sabitledik (Borsayı koruma amaçlı)
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_coin = {executor.submit(scan_single_coin, coin): coin for coin in all_coins}
             
             for i, future in enumerate(as_completed(future_to_coin)):
                 coin_name = future_to_coin[future]
-                res_list = future.result()
-                if res_list: results.extend(res_list)
+                res = future.result()
+                if res: results.append(res)
                 
                 progress_bar.progress((i + 1) / len(all_coins))
-                status.text(f"Taranıyor (1D + 1H): {coin_name} | {i+1}/{len(all_coins)} tamamlandı.")
-                
-                # Her coin işleminden sonra ana akışta kısa bir uyku
-                time.sleep(0.5) 
+                status.text(f"Taranıyor: {coin_name}")
+                time.sleep(0.02) 
         
         status.empty()
         if results:
             df_results = pd.DataFrame(results)
-            # Önce 1D'ler üstte, 1H'ler altta. Sonra kendi içlerinde puana göre.
-            df_results['SortKey'] = df_results['Periyot'].map({'1D': 0, '1H': 1})
-            df_results = df_results.sort_values(by=["SortKey", "Skor (100)"], ascending=[True, False]).drop('SortKey', axis=1).reset_index(drop=True)
+            # Skora göre büyükten küçüğe sırala
+            df_results = df_results.sort_values(by="Skor (100)", ascending=False).reset_index(drop=True)
             
-            st.success(f"✅ {len(all_coins)} coin başarıyla tarandı. Otomatik hata düzeltme ve Rate Limit koruması sorunsuz çalıştı!")
-            st.dataframe(df_results, use_container_width=True, height=750)
+            st.success(f"✅ {len(results)} coin başarıyla tarandı ve detaylı puanlandı!")
+            st.dataframe(df_results, use_container_width=True, height=600)
         else:
-            st.error("Tarama başarısız oldu. Rate limit veya ağ sorunu oluştu, lütfen birkaç dakika bekleyip tekrar deneyin.")
+            st.error("Tarama başarısız oldu. API limitine (Rate limit) takılmış olabilirsiniz, veya girdiğiniz pariteler (örn. XYZ/USDT) borsada bulunmuyor olabilir. Lütfen kontrol edip 1 dakika sonra tekrar deneyin.")
