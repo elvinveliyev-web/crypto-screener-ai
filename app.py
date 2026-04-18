@@ -1963,20 +1963,21 @@ else:
     live = get_live_price(ticker)
     live_price = live.get("last_price", np.nan)
 
-if auto_plan["Action"] == "AL":
-    rec = "AL"
-elif int(latest["EXIT"]) == 1:
-    rec = "SAT"
-elif auto_plan["Action"] == "İZLE":
-    rec = "İZLE"
-else:
-    rec = "UZAK DUR"
-
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=0.0, benchmark_returns=benchmark_returns)
 tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 overbought_result = detect_speculation(df)
 auto_plan = build_auto_trade_plan(ticker, df, latest, tp, rr_info, cfg)
+action = auto_plan.get("Action", "UZAK DUR") if isinstance(auto_plan, dict) else "UZAK DUR"
+
+if action == "AL":
+    rec = "AL"
+elif int(latest["EXIT"]) == 1:
+    rec = "SAT"
+elif action == "İZLE":
+    rec = "İZLE"
+else:
+    rec = "UZAK DUR"
 
 # =============================
 # Build figures
