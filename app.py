@@ -759,6 +759,151 @@ def build_auto_trade_plan(symbol: str, df: pd.DataFrame, latest_row: pd.Series, 
         "Not": note,
     }
 
+def apply_rule_scan_profile(base_cfg: dict, profile_name: str) -> dict:
+    out = dict(base_cfg)
+    out.update(RULE_SCAN_PROFILES.get(profile_name, RULE_SCAN_PROFILES["Dengeli"]))
+    return out
+
+
+def compute_timeframe_snapshot(symbol: str, timeframe: str, cfg: dict, target_datetime=None) -> Optional[Dict[str, Any]]:
+    df_tf = load_data_cached(symbol, "1y", timeframe, target_datetime)
+    if df_tf.empty or len(df_tf) < 120:
+        return None
+
+    feat_tf = build_features(df_tf, cfg)
+    last = feat_tf.iloc[-1]
+    trend_ok = bool(
+        pd.notna(last.get("EMA200", np.nan))
+        and pd.notna(last.get("EMA50", np.nan))
+        and (last["Close"] > last["EMA200"])
+        and (last["EMA50"] > last["EMA200"])
+        and (last["Close"] > last["EMA50"])
+    )
+    confirm_ok = bool(
+        trend_ok
+        and (last.get("RSI", np.nan) > cfg.get("confirm_rsi_min", cfg.get("rsi_entry_level", 50)))
+        and (last.get("MACD_hist", np.nan) > 0)
+        and (last.get("ADX", np.nan) >= cfg.get("adx_min", 20))
+        and (last.get("PLUS_DI", np.nan) > last.get("MINUS_DI", np.nan))
+        and (last.get("Volume", np.nan) > last.get("VOL_SMA", np.nan))
+        and (last.get("OBV", np.nan) > last.get("OBV_EMA", np.nan))
+    )
+    return {"trend_ok": trend_ok, "confirm_ok": confirm_ok, "last": last}
+
+
+def evaluate_symbol_for_rule_scan(symbol: str, cfg: dict, target_datetime=None, use_btc_filter: bool = True, scan_profile_name: str = "Dengeli") -> Optional[Dict[str, Any]]:
+    scan_cfg = apply_rule_scan_profile(cfg, scan_profile_name)
+    scan_tf = "15m"
+
+    df_scan = load_data_cached(symbol, "1y", scan_tf, target_datetime)
+    if df_scan.empty or len(df_scan) < 120:
+        return None
+
+    feat_scan = build_features(df_scan, scan_cfg)
+    market_filter = get_btc_regime_series(target_datetime) if use_btc_filter else None
+    feat_scan, _ = signal_with_checkpoints(feat_scan, scan_cfg, market_filter_series=market_filter, higher_tf_filter_series=None)
+    last_row = feat_scan.iloc[-1]
+
+    tf_4h = compute_timeframe_snapshot(symbol, "4h", scan_cfg, target_datetime)
+    tf_1h = compute_timeframe_snapshot(symbol, "1h", scan_cfg, target_datetime)
+    if tf_4h is None or tf_1h is None:
+        return None
+
+    btc_ok = True
+    if market_filter is not None and not market_filter.empty:
+        btc_ok = bool(market_filter.reindex(feat_scan.index).ffill().fillna(True).iloc[-1])
+
+    trend_4h_ok = bool(tf_4h["trend_ok"])
+    confirm_1h_ok = bool(tf_1h["confirm_ok"])
+
+    tp_scan = target_price_band(feat_scan)
+    rr_scan = rr_from_atr_stop(last_row, tp_scan, scan_cfg)
+    plan = build_auto_trade_plan(symbol, feat_scan, last_row, tp_scan, rr_scan, scan_cfg)
+
+    risk_pct = float(plan["Risk %"]) if pd.notna(plan["Risk %"]) else np.nan
+    max_stop_ok = bool(np.isfinite(risk_pct) and (risk_pct <= scan_cfg.get("max_stop_pct", 4.0)))
+
+    breakout_now = bool(int(last_row.get("BREAKOUT_OK", 0)) == 1)
+    allow_breakout = bool(scan_cfg.get("allow_breakout_entry", True))
+    pattern_pullback = bool(
+        int(last_row.get("KANGAROO_BULL", 0)) == 1
+        or int(last_row.get("PATTERN_ENGULFING_BULL", 0)) == 1
+        or int(last_row.get("PATTERN_HAMMER", 0)) == 1
+        or int(last_row.get("PATTERN_TWEEZER_BOTTOM", 0)) == 1
+        or int(last_row.get("PATTERN_INV_HAMMER", 0)) == 1
+    )
+    ema13 = float(last_row.get("EMA13_Close", np.nan)) if pd.notna(last_row.get("EMA13_Close", np.nan)) else np.nan
+    pullback_ok = bool(
+        pattern_pullback
+        or (
+            np.isfinite(ema13)
+            and float(last_row["Close"]) <= ema13 * (1 + scan_cfg.get("pullback_chase_pct", 0.01))
+        )
+    )
+
+    structure_ok = btc_ok and trend_4h_ok and confirm_1h_ok and max_stop_ok
+    entry_ok = bool(int(last_row.get("ENTRY", 0)) == 1)
+    rr_ok = bool(pd.notna(plan["RR"]) and np.isfinite(plan["RR"]) and plan["RR"] >= scan_cfg.get("min_rr", 1.8))
+    score_ok = bool(float(last_row.get("SCORE", 0)) >= scan_cfg.get("score_entry_threshold", 70))
+    setup_ok = pullback_ok or (breakout_now and allow_breakout)
+    breakout_policy_ok = (not breakout_now) or allow_breakout
+
+    if structure_ok and entry_ok and rr_ok and score_ok and setup_ok and breakout_policy_ok:
+        action = "AL"
+        note = f"{scan_profile_name} mod: 4H trend + 1H onay + 15m tetik geçti."
+    elif structure_ok and (float(last_row.get("SCORE", 0)) >= scan_cfg.get("watch_score_threshold", 65) or plan["Action"] == "İZLE"):
+        action = "İZLE"
+        note = f"{scan_profile_name} mod: yapı olumlu, 15m tetik veya RR henüz tam net değil."
+    else:
+        action = "PAS"
+        reasons = []
+        if not trend_4h_ok:
+            reasons.append("4H trend zayıf")
+        if not confirm_1h_ok:
+            reasons.append("1H onay yok")
+        if not max_stop_ok:
+            reasons.append(f"stop %{scan_cfg.get('max_stop_pct', 4.0):.1f} üstü")
+        if breakout_now and not allow_breakout:
+            reasons.append("mod breakout istemiyor")
+        if not rr_ok:
+            reasons.append("RR yetersiz")
+        if not entry_ok:
+            reasons.append("15m tetik yok")
+        note = f"{scan_profile_name} mod: " + (", ".join(reasons[:3]) if reasons else "kural seti tam onay vermedi.")
+
+    plan["Action"] = action
+    plan["Not"] = note
+
+    return {
+        "Sembol": symbol,
+        "Mod": scan_profile_name,
+        "Trend": "4H",
+        "Onay": "1H",
+        "Tetik": "15M",
+        "Durum": plan["Action"],
+        "Kurulum": plan["Setup"],
+        "Skor (100)": round(plan["Score"], 1),
+        "Fiyat": round(float(last_row["Close"]), 6),
+        "Alış": round(plan["Entry"], 6) if np.isfinite(plan["Entry"]) else np.nan,
+        "Stop": round(plan["Stop"], 6) if np.isfinite(plan["Stop"]) else np.nan,
+        "Hedef 1": round(plan["Target 1"], 6) if np.isfinite(plan["Target 1"]) else np.nan,
+        "Hedef 2": round(plan["Target 2"], 6) if np.isfinite(plan["Target 2"]) else np.nan,
+        "RR": round(plan["RR"], 2) if np.isfinite(plan["RR"]) else np.nan,
+        "Risk %": round(plan["Risk %"], 2) if np.isfinite(plan["Risk %"]) else np.nan,
+        "Maks Stop %": scan_cfg.get("max_stop_pct", 4.0),
+        "4H Trend": "Uygun 🟢" if trend_4h_ok else "Zayıf 🔴",
+        "1H Onay": "Var 🟢" if confirm_1h_ok else "Yok 🔴",
+        "15M Tetik": "Var 🟢" if entry_ok else "Yok 🔴",
+        "RSI": round(float(last_row["RSI"]), 2),
+        "ADX": round(float(last_row["ADX"]), 2),
+        "MACD Hist": "Pozitif 🟢" if last_row["MACD_hist"] > 0 else "Negatif 🔴",
+        "Hacim": "Yüksek 🟢" if last_row["Volume"] > last_row["VOL_SMA"] else "Düşük 🔴",
+        "Dirence Yakın": plan["Near Resistance"],
+        "Spekülasyon": plan["Speculation Hot"],
+        "Not": plan["Not"],
+    }
+
+
 def evaluate_symbol_for_screener(symbol: str, scan_tf: str, cfg: dict, target_datetime=None, use_btc_filter: bool = True, use_higher_tf_filter: bool = True) -> Optional[Dict[str, Any]]:
     df_scan = load_data_cached(symbol, "1y", scan_tf, target_datetime)
     if df_scan.empty or len(df_scan) < 120:
@@ -1284,6 +1429,51 @@ PRESETS = {
     "Defansif": {"rsi_entry_level": 52, "rsi_exit_level": 46, "atr_pct_max": 0.06, "atr_stop_mult": 2.0, "time_stop_bars": 15, "take_profit_mult": 2.5},
     "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 1.5, "time_stop_bars": 10, "take_profit_mult": 2.0},
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 1.2, "time_stop_bars": 7, "take_profit_mult": 1.5},
+}
+
+RULE_SCAN_PROFILES = {
+    "Muhafazakâr": {
+        "score_entry_threshold": 78,
+        "adx_min": 22,
+        "min_rr": 2.0,
+        "sr_buffer_pct": 1.5,
+        "atr_pct_min": 0.004,
+        "breakout_vol_ratio": 1.8,
+        "second_target_rr": 3.2,
+        "max_stop_pct": 3.5,
+        "allow_breakout_entry": False,
+        "watch_score_threshold": 70,
+        "confirm_rsi_min": 52,
+        "pullback_chase_pct": 0.005,
+    },
+    "Dengeli": {
+        "score_entry_threshold": 72,
+        "adx_min": 20,
+        "min_rr": 1.8,
+        "sr_buffer_pct": 1.0,
+        "atr_pct_min": 0.003,
+        "breakout_vol_ratio": 1.6,
+        "second_target_rr": 2.8,
+        "max_stop_pct": 4.0,
+        "allow_breakout_entry": True,
+        "watch_score_threshold": 65,
+        "confirm_rsi_min": 50,
+        "pullback_chase_pct": 0.010,
+    },
+    "Agresif": {
+        "score_entry_threshold": 66,
+        "adx_min": 18,
+        "min_rr": 1.5,
+        "sr_buffer_pct": 0.7,
+        "atr_pct_min": 0.002,
+        "breakout_vol_ratio": 1.4,
+        "second_target_rr": 2.4,
+        "max_stop_pct": 5.0,
+        "allow_breakout_entry": True,
+        "watch_score_threshold": 60,
+        "confirm_rsi_min": 48,
+        "pullback_chase_pct": 0.015,
+    },
 }
 
 # =============================
@@ -2481,10 +2671,12 @@ with tab_triple:
 # =============================
 with tab_rules:
     st.header("🎯 Tara ve Öner — Otomatik Long Kural Seti")
-    st.markdown("Tek tuşla coinleri tarar, long kurallarını uygular ve **alış / stop / hedef** rakamlarını üretir. Mevcut sekmeler korunmuştur; bu sekme tamamen öneri üretmek içindir.")
+    st.markdown("Tek tuşla coinleri tarar, **4H trend filtresi + 1H onay + 15M tetik** mantığıyla long adaylarını bulur ve **alış / stop / hedef** rakamlarını üretir.")
 
     if use_timemachine:
         st.warning(f"Zaman Makinesi Aktif: Tarama **{target_datetime}** verileri baz alınarak yapılacaktır.")
+
+    st.info("Bu sekmede tarama mantığı sabittir: **Trend = 4H | Onay = 1H | Tetik = 15M**")
 
     rule_scan_source = st.radio(
         "Tarama evreni",
@@ -2502,8 +2694,15 @@ with tab_rules:
 
     rr_col1, rr_col2, rr_col3 = st.columns(3)
     rule_scan_count = rr_col1.slider("Maksimum coin sayısı", 10, 300, 120, step=10, key="rule_scan_count")
-    rule_scan_tf = rr_col2.selectbox("Giriş periyodu", ["15m", "1h", "4h", "1d"], index=1, key="rule_scan_tf")
+    rule_scan_mode = rr_col2.selectbox("Tarama modu", list(RULE_SCAN_PROFILES.keys()), index=1, key="rule_scan_mode")
     only_buy_candidates = rr_col3.checkbox("Sadece AL adaylarını göster", value=True, key="only_buy_candidates")
+
+    mode_cfg_preview = apply_rule_scan_profile(cfg, rule_scan_mode)
+    st.caption(
+        f"{rule_scan_mode} mod | Min skor: {mode_cfg_preview['score_entry_threshold']} | Min RR: {mode_cfg_preview['min_rr']:.1f} | "
+        f"Min ADX: {mode_cfg_preview['adx_min']} | Max stop: %{mode_cfg_preview['max_stop_pct']:.1f} | "
+        f"Breakout: {'Açık' if mode_cfg_preview['allow_breakout_entry'] else 'Kapalı'}"
+    )
 
     if st.button("🚀 Tara ve Öneriyi Çalıştır", key="run_rule_screener"):
         all_coins = resolve_scan_universe(rule_scan_source, rule_custom_input, rule_scan_count)
@@ -2512,15 +2711,14 @@ with tab_rules:
         status = st.empty()
 
         for i, coin in enumerate(all_coins):
-            status.text(f"Kural seti uygulanıyor ({rule_scan_tf}): {coin} | {i+1}/{len(all_coins)}")
+            status.text(f"{rule_scan_mode} mod taranıyor (4H→1H→15M): {coin} | {i+1}/{len(all_coins)}")
             try:
-                row = evaluate_symbol_for_screener(
+                row = evaluate_symbol_for_rule_scan(
                     coin,
-                    rule_scan_tf,
                     cfg,
                     target_datetime=target_datetime,
                     use_btc_filter=use_btc_filter,
-                    use_higher_tf_filter=use_higher_tf_filter,
+                    scan_profile_name=rule_scan_mode,
                 )
                 if row is not None:
                     results.append(row)
@@ -2528,13 +2726,13 @@ with tab_rules:
                 pass
 
             progress_bar.progress((i + 1) / len(all_coins))
-            time.sleep(0.25)
+            time.sleep(0.20)
 
         status.empty()
 
         if results:
             df_rule_results = pd.DataFrame(results)
-            df_rule_results = df_rule_results.sort_values(by=["Skor (100)", "RR"], ascending=[False, False]).reset_index(drop=True)
+            df_rule_results = df_rule_results.sort_values(by=["Durum", "Skor (100)", "RR"], ascending=[True, False, False]).reset_index(drop=True)
             if only_buy_candidates:
                 df_rule_results = df_rule_results[df_rule_results["Durum"] == "AL"].reset_index(drop=True)
 
@@ -2544,7 +2742,7 @@ with tab_rules:
             else:
                 top_show = min(len(df_rule_results), 15)
                 st.subheader(f"En iyi {top_show} aday")
-                st.dataframe(df_rule_results.head(top_show), use_container_width=True, height=520)
+                st.dataframe(df_rule_results.head(top_show), use_container_width=True, height=560)
 
                 best = df_rule_results.iloc[0]
                 st.markdown("### Seçili en iyi aday özeti")
