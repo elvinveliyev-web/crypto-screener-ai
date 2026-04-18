@@ -869,8 +869,8 @@ def get_period_rules(period_key: str) -> Tuple[str, str]:
     if period_key == "daily":
         return "D", "W-SUN"
     if period_key == "weekly":
-        return "W-SUN", "M"
-    return "M", "Q"
+        return "W-SUN", "ME"
+    return "ME", "QE"
 
 
 def build_period_ohlcv_from_daily(symbol: str, period_key: str, anchor_dt) -> pd.DataFrame:
