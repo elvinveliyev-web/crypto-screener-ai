@@ -370,6 +370,10 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
 # =============================
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
+    df["EMA13_High"] = ema(df["High"], 13)
+    df["EMA13_Low"] = ema(df["Low"], 13)
+    df["EMA13_Close"] = ema(df["Close"], 13)
+    df["EMA20"] = ema(df["Close"], 20)
     df["EMA50"] = ema(df["Close"], int(cfg["ema_fast"]))
     df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
@@ -393,6 +397,10 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["BB_WIDTH"] = ((df["BB_upper"] - df["BB_lower"]) / bb_mid_safe).replace([np.inf, -np.inf], np.nan)
     vol_sma_safe = df["VOL_SMA"].replace(0, np.nan)
     df["VOL_RATIO"] = (df["Volume"] / vol_sma_safe).replace([np.inf, -np.inf], np.nan)
+    df["ROLL_HIGH_20"] = df["High"].shift(1).rolling(20).max()
+    df["ROLL_LOW_20"] = df["Low"].shift(1).rolling(20).min()
+    df["RESIST_PCT_GAP"] = ((df["ROLL_HIGH_20"] / df["Close"]) - 1.0) * 100.0
+    df["SUPPORT_PCT_GAP"] = ((df["Close"] / df["ROLL_LOW_20"]) - 1.0) * 100.0
 
     df = add_overbought_indicators(df)
     df = add_kangaroo_tails(df)
@@ -466,10 +474,59 @@ def get_higher_tf_trend_series(ticker: str, higher_tf_interval: str = "1w", ema_
 # =============================
 # Strategy: scoring + checkpoints
 # =============================
+MIDAS_TICKERS = [
+                "WCT", "0G", "1INCH", "AEVO", "AAVE", "ACM", "ACX", "ACT", "AERO", "AI16Z", 
+                "AIXBT", "ACH", "ALGO", "ALLO", "AMP", "ANIME", "ANKR", "APE", "API3", "APT", 
+                "ARB", "ARK", "ARKM", "ARPA", "FET", "AR", "ASR", "ASTR", "ASTER", "ATM", 
+                "BEAT", "AUDIO", "AVAX", "AXL", "AXS", "BEAM", "BEL", "BERA", "BNB", "BNX", 
+                "BIO", "BTC", "BCH", "TAO", "BTT", "BLUR", "BONK", "BOME", "AUCTION", "BB", 
+                "ZKC", "BRETT", "BREV", "BMT", "GALA", "ADA", "MEW", "CATI", "TIA", "CFG", 
+                "CETUS", "LINK", "COAI", "CHZ", "COMP", "CFX", "CORE", "ATOM", "COTI", "COW", 
+                "CRO", "CRV", "CYBER", "MANA", "HOME", "DEGEN", "DOGE", "DOGS", "WIF", "2Z", 
+                "DYDX", "DYM", "EIGEN", "ENJ", "ENSO", "EOS", "ENA", "ETHFI", "ETH", "ENS", 
+                "ROBO", "FF", "FARTCOIN", "BAR", "PORTO", "FIL", "FLOKI", "FOGO", "GMT", "GOAT", 
+                "GPS", "GRASS", "G", "HMSTR", "HBAR", "HOT", "ZEN", "HUMA", "H", "WET", "HYPE", 
+                "IMX", "INIT", "INJ", "ICP", "IO", "IOTA", "JASMY", "JTO", "JUP", "JUV", "KAIA", 
+                "KAITO", "KAS", "KERNEL", "KITE", "KSM", "LAUNCHCOIN", "ZRO", "LDO", "LIT", "LINEA", 
+                "LTC", "LPT", "BARD", "LUMIA", "ME", "CITY", "OM", "MANTA", "SYRUP", "MASK", 
+                "MEME", "MERL", "MET", "METIS", "MINA", "MOG", "MOODENG", "MORPHO", "MOVE", "EGLD", 
+                "SHELL", "NEAR", "NEIRO", "NEO", "NEWT", "NOT", "NMR", "ROSE", "TRUMP", "OMNI", 
+                "ONDO", "XCN", "EDU", "EDEN", "OPN", "OP", "ORCA", "ORDER", "ORDI", "OGN", "CAKE", 
+                "PRCL", "PSG", "PAXG", "PYUSD", "PNUT", "PENDLE", "PEPE", "PHA", "PI", "PIXEL", 
+                "XPL", "PLUME", "DOT", "POL", "PENGU", "PUMP", "PYTH", "QTUM", "QNT", "RAD", "RAVE", 
+                "RAY", "RIO", "RED", "RENDER", "REZ", "XRP", "RONIN", "LAZIO", "SAGA", "SAHARA", 
+                "SCR", "SKR", "SEI", "SENT", "SHIB", "CAT", "SKL", "SKY", "SOL", "LAYER", "SOLV", 
+                "SOMI", "S", "SXT", "SPELL", "SPX", "STX", "STRK", "XLM", "STEEM", "STORJ", "IP", 
+                "SUI", "RARE", "SUPER", "SUSHI", "SNX", "TRB", "TNSR", "USDT", "EURT", "XAUT", 
+                "GRT", "SAND", "THETA", "TON", "TOSHI", "MAGIC", "TREE", "TRX", "TRU", "TWT", 
+                "TURBO", "UMA", "UNI", "USDC", "USUAL", "VANA", "VANRY", "VET", "VVV", "VINE", 
+                "VIRTUAL", "VSN", "WAL", "WLFI", "WLD", "W", "XAI", "ZETA", "ZEUS", "ZK", "ZORA"
+]
+
+def resolve_scan_universe(scan_source: str, custom_tickers_input: str, scan_count: int) -> List[str]:
+    kucoin_universe = get_crypto_universe()
+    if scan_source == "Özel Listem" and (custom_tickers_input or "").strip():
+        raw_list = custom_tickers_input.replace("\n", ",").split(",")
+        all_coins = [c.strip().upper() for c in raw_list if c.strip()]
+        all_coins = [c if "/" in c else f"{c}/USDT" for c in all_coins]
+        return list(dict.fromkeys([c for c in all_coins if c in kucoin_universe]))[:scan_count]
+    if scan_source == "Midas Kripto (Sadece Midas'ta olan coinler)":
+        midas_coins = [f"{c.upper()}/USDT" for c in MIDAS_TICKERS]
+        return [c for c in midas_coins if c in kucoin_universe][:scan_count]
+    return kucoin_universe[:scan_count]
+
+def _pattern_signal(df: pd.DataFrame, cols: List[str]) -> pd.Series:
+    out = pd.Series(False, index=df.index)
+    for c in cols:
+        if c in df.columns:
+            out = out | (df[c].fillna(0).astype(int) == 1)
+    return out.fillna(False)
+
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_series: pd.Series = None, higher_tf_filter_series: pd.Series = None):
     df = df.copy()
+
     liq_ok = (df["Volume"] > df["VOL_SMA"]).fillna(False)
-    trend_ok = (df["Close"] > df["EMA200"]) & (df["EMA50"] > df["EMA200"])
+    trend_ok = ((df["Close"] > df["EMA200"]) & (df["EMA50"] > df["EMA200"]) & (df["Close"] > df["EMA50"])).fillna(False)
 
     if market_filter_series is not None and not market_filter_series.empty:
         aligned_market = market_filter_series.reindex(df.index).ffill().fillna(True)
@@ -481,49 +538,264 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_series: p
     else:
         aligned_htf = pd.Series(True, index=df.index)
 
-    rsi_ok = df["RSI"] > cfg["rsi_entry_level"]
-    rsi_cross = (df["RSI"] > cfg["rsi_entry_level"]) & (df["RSI"].shift(1) <= cfg["rsi_entry_level"])
-    macd_ok = df["MACD_hist"] > 0
-    macd_turn = (df["MACD_hist"] > 0) & (df["MACD_hist"].shift(1) <= 0)
+    rsi_ok = (df["RSI"] > cfg["rsi_entry_level"]).fillna(False)
+    rsi_cross = ((df["RSI"] > cfg["rsi_entry_level"]) & (df["RSI"].shift(1) <= cfg["rsi_entry_level"])).fillna(False)
+    macd_ok = (df["MACD_hist"] > 0).fillna(False)
+    macd_turn = ((df["MACD_hist"] > 0) & (df["MACD_hist"].shift(1) <= 0)).fillna(False)
+
     atr_pct = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
-    vol_ok = atr_pct < cfg["atr_pct_max"]
-    bb_ok = df["Close"] > df["BB_mid"]
-    bb_break = (df["Close"] > df["BB_upper"]) & trend_ok
-    obv_ok = df["OBV"] > df["OBV_EMA"]
+    vol_ok = ((atr_pct < cfg["atr_pct_max"]) & (atr_pct > cfg.get("atr_pct_min", 0.0))).fillna(False)
 
-    w = {"liq": 10, "trend": 25, "rsi": 15, "macd": 15, "vol": 10, "bb": 15, "obv": 10}
-    score = (
-        w["liq"] * liq_ok.astype(int)
-        + w["trend"] * trend_ok.astype(int)
-        + w["rsi"] * rsi_ok.astype(int)
-        + w["macd"] * macd_ok.astype(int)
-        + w["vol"] * vol_ok.astype(int)
-        + w["bb"] * (bb_ok | bb_break).astype(int)
-        + w["obv"] * obv_ok.astype(int)
-    ).astype(float)
+    bb_ok = (df["Close"] > df["BB_mid"]).fillna(False)
+    bb_break = ((df["Close"] > df["BB_upper"]) & trend_ok).fillna(False)
+    obv_ok = (df["OBV"] > df["OBV_EMA"]).fillna(False)
 
-    entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 1
-    entry = trend_ok & vol_ok & liq_ok & entry_triggers & aligned_market & aligned_htf
+    adx_ok = ((df["ADX"] >= cfg.get("adx_min", 20)) & (df["PLUS_DI"] > df["MINUS_DI"])).fillna(False)
+    stoch_ok = ((df["STOCH_K"] > df["STOCH_D"]) & (df["STOCH_K"] < cfg.get("stoch_upper", 85))).fillna(False)
+    stoch_turn = ((df["STOCH_K"] > df["STOCH_D"]) & (df["STOCH_K"].shift(1) <= df["STOCH_D"].shift(1)) & (df["STOCH_K"] < cfg.get("stoch_upper", 85))).fillna(False)
 
-    exit_ = ((df["Close"] < df["EMA50"]) | (df["MACD_hist"] < 0) | (df["RSI"] < cfg["rsi_exit_level"]) | (df["Close"] < df["BB_mid"]))
+    prior_high = df["ROLL_HIGH_20"]
+    resistance_gap_pct = ((prior_high / df["Close"]) - 1.0) * 100.0
+    near_resistance = ((df["Close"] < prior_high) & (resistance_gap_pct <= cfg.get("sr_buffer_pct", 1.0))).fillna(False)
+    breakout_ok = ((df["Close"] > prior_high) & (df["VOL_RATIO"] >= cfg.get("breakout_vol_ratio", 1.5))).fillna(False)
+    sr_ok = (~near_resistance) | breakout_ok
+
+    bull_patterns = _pattern_signal(df, ["KANGAROO_BULL", "PATTERN_ENGULFING_BULL", "PATTERN_HAMMER", "PATTERN_MORNING_STAR", "PATTERN_PIERCING", "PATTERN_MARUBOZU_BULL", "PATTERN_TWEEZER_BOTTOM", "PATTERN_INV_HAMMER"])
+    bear_patterns = _pattern_signal(df, ["KANGAROO_BEAR", "PATTERN_ENGULFING_BEAR", "PATTERN_SHOOTING_STAR", "PATTERN_EVENING_STAR", "PATTERN_DARK_CLOUD", "PATTERN_MARUBOZU_BEAR", "PATTERN_TWEEZER_TOP", "PATTERN_HANGING_MAN"])
+
+    speculation_hot = (
+        (df["RSI_OVERBOUGHT"] == 1)
+        & (df["BB_OVERBOUGHT"] == 1)
+        & ((df["VOLUME_SPIKE"] == 1) | (df["PRICE_EXTREME"] == 1))
+        & ((df["WEAK_UPTREND"] == 1) | (df["STOCH_OVERBOUGHT"] == 1))
+    ).fillna(False)
+    speculation_ok = ((~speculation_hot) | breakout_ok | (df["RSI"] < 70)).fillna(False)
+
+    score_components = {
+        "Market Filter": aligned_market.astype(int) * 5,
+        "Higher TF": aligned_htf.astype(int) * 8,
+        "Liquidity": liq_ok.astype(int) * 8,
+        "Trend": trend_ok.astype(int) * 16,
+        "RSI": rsi_ok.astype(int) * 8,
+        "MACD": macd_ok.astype(int) * 10,
+        "ATR Window": vol_ok.astype(int) * 6,
+        "Bollinger": (bb_ok | bb_break).astype(int) * 6,
+        "OBV": obv_ok.astype(int) * 8,
+        "ADX": adx_ok.astype(int) * 10,
+        "Stoch": stoch_ok.astype(int) * 5,
+        "SR Clearance": sr_ok.astype(int) * 8,
+        "Speculation": speculation_ok.astype(int) * 6,
+        "Bullish Pattern": bull_patterns.astype(int) * 6,
+        "Bearish Penalty": bear_patterns.astype(int) * -6,
+    }
+    raw_score = sum(score_components.values()).astype(float)
+    raw_score = raw_score.clip(lower=0)
+    max_score = 100.0
+    score = raw_score.clip(upper=max_score)
+
+    entry_triggers = (
+        rsi_cross.astype(int)
+        + macd_turn.astype(int)
+        + bb_break.astype(int)
+        + stoch_turn.astype(int)
+        + bull_patterns.astype(int)
+    ) >= cfg.get("min_entry_triggers", 2)
+
+    score_ok = score >= cfg.get("score_entry_threshold", 70)
+
+    entry = (
+        aligned_market
+        & aligned_htf
+        & liq_ok
+        & trend_ok
+        & vol_ok
+        & obv_ok
+        & adx_ok
+        & sr_ok
+        & speculation_ok
+        & entry_triggers
+        & score_ok
+    )
+
+    exit_ = (
+        (df["Close"] < df["EMA50"])
+        | (df["MACD_hist"] < 0)
+        | (df["RSI"] < cfg["rsi_exit_level"])
+        | (df["Close"] < df["BB_mid"])
+        | bear_patterns
+        | ((df["ADX"] < max(18, cfg.get("adx_min", 20) - 2)) & (df["RSI"] < 50))
+    ).fillna(False)
 
     df["SCORE"] = score
     df["ENTRY"] = entry.astype(int)
     df["EXIT"] = exit_.astype(int)
+    df["NEAR_RESISTANCE"] = near_resistance.astype(int)
+    df["BREAKOUT_OK"] = breakout_ok.astype(int)
+    df["SPECULATION_HOT"] = speculation_hot.astype(int)
+    df["ADX_OK"] = adx_ok.astype(int)
+    df["STOCH_OK"] = stoch_ok.astype(int)
+    df["BULL_PATTERN_OK"] = bull_patterns.astype(int)
+    df["BEAR_PATTERN_WARN"] = bear_patterns.astype(int)
 
     last = df.iloc[-1]
     cp = {
         "Market Filter OK": bool(aligned_market.iloc[-1]),
         "Higher TF Filter OK": bool(aligned_htf.iloc[-1]),
-        "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
-        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"])) if pd.notna(last["EMA200"]) else False,
-        f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
-        "MACD Hist > 0": bool(last["MACD_hist"] > 0) if pd.notna(last["MACD_hist"]) else False,
-        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"]) if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
-        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"])) if pd.notna(last["BB_mid"]) else False,
-        "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
+        "Liquidity (Volume > VolSMA)": bool(liq_ok.iloc[-1]),
+        "Trend (Close>EMA50>EMA200)": bool(trend_ok.iloc[-1]),
+        f"RSI > {cfg['rsi_entry_level']}": bool(rsi_ok.iloc[-1]),
+        "MACD Hist > 0": bool(macd_ok.iloc[-1]),
+        f"ATR% bandı uygun": bool(vol_ok.iloc[-1]),
+        "ADX trend onayı": bool(adx_ok.iloc[-1]),
+        "Stoch trend onayı": bool(stoch_ok.iloc[-1]),
+        "Bollinger / breakout uyumu": bool((bb_ok | bb_break).iloc[-1]),
+        "OBV > OBV_EMA": bool(obv_ok.iloc[-1]),
+        "Dirence çok yakın değil": bool(sr_ok.iloc[-1]),
+        "Spekülasyon filtresi uygun": bool(speculation_ok.iloc[-1]),
+        "Bullish pattern desteği": bool(bull_patterns.iloc[-1]),
+        f"Skor >= {cfg.get('score_entry_threshold', 70)}": bool(score_ok.iloc[-1]),
     }
     return df, cp
+
+def build_auto_trade_plan(symbol: str, df: pd.DataFrame, latest_row: pd.Series, tp_dict: dict, rr_info: dict, cfg: dict) -> Dict[str, Any]:
+    close = float(latest_row["Close"])
+    atrv = float(latest_row.get("ATR", np.nan)) if pd.notna(latest_row.get("ATR", np.nan)) else np.nan
+    ema13 = float(latest_row.get("EMA13_Close", np.nan)) if pd.notna(latest_row.get("EMA13_Close", np.nan)) else np.nan
+    bb_mid = float(latest_row.get("BB_mid", np.nan)) if pd.notna(latest_row.get("BB_mid", np.nan)) else np.nan
+    prior_low = float(latest_row.get("ROLL_LOW_20", np.nan)) if pd.notna(latest_row.get("ROLL_LOW_20", np.nan)) else np.nan
+    bull_band = tp_dict.get("bull") if tp_dict else None
+    rr = rr_info.get("rr") if rr_info else None
+
+    if not np.isfinite(atrv) or atrv <= 0:
+        return {
+            "Symbol": symbol,
+            "Action": "PAS",
+            "Setup": "Veri Yetersiz",
+            "Entry": np.nan,
+            "Stop": np.nan,
+            "Target 1": np.nan,
+            "Target 2": np.nan,
+            "RR": np.nan,
+            "Risk %": np.nan,
+            "Score": float(latest_row.get("SCORE", 0)),
+            "Not": "ATR hesaplanamadı."
+        }
+
+    breakout_mode = bool(latest_row.get("BREAKOUT_OK", 0) == 1)
+    if breakout_mode:
+        entry = close
+        setup = "Breakout"
+    else:
+        pullback_candidates = [close]
+        if np.isfinite(ema13) and ema13 < close:
+            pullback_candidates.append(ema13)
+        if np.isfinite(bb_mid) and bb_mid < close:
+            pullback_candidates.append(bb_mid)
+        entry = max(pullback_candidates)
+        setup = "Pullback / Trend devamı"
+
+    atr_stop = close - (cfg["atr_stop_mult"] * atrv)
+    if latest_row.get("KANGAROO_BULL", 0) == 1:
+        structure_stop = float(latest_row["Low"]) - (0.5 * atrv)
+    elif np.isfinite(prior_low) and prior_low < close:
+        structure_stop = prior_low - (0.2 * atrv)
+    else:
+        structure_stop = atr_stop
+
+    stop = max(structure_stop, atr_stop)
+    risk = entry - stop
+    if risk <= 0:
+        stop = close - (1.2 * atrv)
+        risk = entry - stop
+
+    r1 = bull_band[2] if bull_band else None
+    bull2 = bull_band[1] if bull_band else None
+
+    target1 = None
+    if r1 is not None and np.isfinite(r1) and r1 > entry:
+        target1 = float(r1)
+    else:
+        target1 = entry + (max(cfg.get("min_rr", 1.8), 1.0) * risk)
+
+    target2 = None
+    if bull2 is not None and np.isfinite(bull2) and bull2 > target1:
+        target2 = float(bull2)
+    else:
+        target2 = entry + (max(cfg.get("second_target_rr", 2.8), 2.0) * risk)
+
+    rr1 = (target1 - entry) / risk if risk > 0 else np.nan
+    risk_pct = (risk / entry) * 100 if entry > 0 else np.nan
+    risk_amount = float(cfg.get("initial_capital", 0.0)) * float(cfg.get("risk_per_trade", 0.0))
+    units = risk_amount / risk if risk > 0 else np.nan
+    approx_position_value = units * entry if np.isfinite(units) else np.nan
+
+    if int(latest_row.get("ENTRY", 0)) == 1 and np.isfinite(rr1) and rr1 >= cfg.get("min_rr", 1.8):
+        action = "AL"
+        note = "Tüm long kuralları ve minimum RR eşiği geçti."
+    elif float(latest_row.get("SCORE", 0)) >= max(cfg.get("score_entry_threshold", 70) - 5, 55):
+        action = "İZLE"
+        note = "Kuralların çoğu olumlu; tetik veya RR iyileşmesi beklenebilir."
+    else:
+        action = "PAS"
+        note = "Kural seti tam onay vermedi."
+
+    return {
+        "Symbol": symbol,
+        "Action": action,
+        "Setup": setup,
+        "Entry": float(entry),
+        "Stop": float(stop),
+        "Target 1": float(target1),
+        "Target 2": float(target2),
+        "RR": float(rr1) if np.isfinite(rr1) else np.nan,
+        "Risk %": float(risk_pct) if np.isfinite(risk_pct) else np.nan,
+        "Score": float(latest_row.get("SCORE", 0)),
+        "Trend": "Yukarı" if latest_row.get("EMA50", np.nan) > latest_row.get("EMA200", np.nan) else "Zayıf",
+        "Breakout": "Evet" if breakout_mode else "Hayır",
+        "Near Resistance": "Evet" if int(latest_row.get("NEAR_RESISTANCE", 0)) == 1 else "Hayır",
+        "Speculation Hot": "Evet" if int(latest_row.get("SPECULATION_HOT", 0)) == 1 else "Hayır",
+        "Qty @ Risk": float(units) if np.isfinite(units) else np.nan,
+        "Pos Value": float(approx_position_value) if np.isfinite(approx_position_value) else np.nan,
+        "Not": note,
+    }
+
+def evaluate_symbol_for_screener(symbol: str, scan_tf: str, cfg: dict, target_datetime=None, use_btc_filter: bool = True, use_higher_tf_filter: bool = True) -> Optional[Dict[str, Any]]:
+    df_scan = load_data_cached(symbol, "1y", scan_tf, target_datetime)
+    if df_scan.empty or len(df_scan) < 120:
+        return None
+
+    feat_scan = build_features(df_scan, cfg)
+
+    market_filter = get_btc_regime_series(target_datetime) if use_btc_filter else None
+    higher_tf = get_higher_tf_trend_series(symbol, higher_tf_interval="4h" if scan_tf == "15m" else "1w", ema_period=200, target_dt=target_datetime) if use_higher_tf_filter else None
+
+    feat_scan, _ = signal_with_checkpoints(feat_scan, cfg, market_filter_series=market_filter, higher_tf_filter_series=higher_tf)
+    last_row = feat_scan.iloc[-1]
+    tp_scan = target_price_band(feat_scan)
+    rr_scan = rr_from_atr_stop(last_row, tp_scan, cfg)
+    plan = build_auto_trade_plan(symbol, feat_scan, last_row, tp_scan, rr_scan, cfg)
+
+    return {
+        "Sembol": symbol,
+        "Periyot": scan_tf.upper(),
+        "Durum": plan["Action"],
+        "Kurulum": plan["Setup"],
+        "Skor (100)": round(plan["Score"], 1),
+        "Fiyat": round(float(last_row["Close"]), 6),
+        "Alış": round(plan["Entry"], 6) if np.isfinite(plan["Entry"]) else np.nan,
+        "Stop": round(plan["Stop"], 6) if np.isfinite(plan["Stop"]) else np.nan,
+        "Hedef 1": round(plan["Target 1"], 6) if np.isfinite(plan["Target 1"]) else np.nan,
+        "Hedef 2": round(plan["Target 2"], 6) if np.isfinite(plan["Target 2"]) else np.nan,
+        "RR": round(plan["RR"], 2) if np.isfinite(plan["RR"]) else np.nan,
+        "Risk %": round(plan["Risk %"], 2) if np.isfinite(plan["Risk %"]) else np.nan,
+        "RSI": round(float(last_row["RSI"]), 2),
+        "ADX": round(float(last_row["ADX"]), 2),
+        "MACD Hist": "Pozitif 🟢" if last_row["MACD_hist"] > 0 else "Negatif 🔴",
+        "Hacim": "Yüksek 🟢" if last_row["Volume"] > last_row["VOL_SMA"] else "Düşük 🔴",
+        "Dirence Yakın": plan["Near Resistance"],
+        "Spekülasyon": plan["Speculation Hot"],
+        "Not": plan["Not"],
+    }
 
 # =============================
 # Backtest
@@ -548,12 +820,14 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
     slippage = cfg["slippage_bps"] / 10000.0
     time_stop_bars = cfg.get("time_stop_bars", 10)
     tp_mult = cfg.get("take_profit_mult", 2.0)
-    risk_pct = float(cfg.get("risk_per_trade", 0.01)) 
+    risk_pct = float(cfg.get("risk_per_trade", 0.01))
 
     for i in range(len(df)):
         row = df.iloc[i]
         date = df.index[i]
         price = float(row["Close"])
+        high = float(row["High"])
+        low = float(row["Low"])
 
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
@@ -570,17 +844,17 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
                 else:
                     stop_dist = cfg["atr_stop_mult"] * atrv
                     stop_price = price - stop_dist
-                
-                potential_shares = risk_amount / stop_dist
+
+                potential_shares = risk_amount / stop_dist if stop_dist > 0 else 0.0
                 max_shares = cash / (price * (1 + slippage + commission))
                 shares_to_buy = min(potential_shares, max_shares)
-                
-                if shares_to_buy > 0.001: 
+
+                if shares_to_buy > 0.001:
                     shares = shares_to_buy
                     entry_price = price * (1 + slippage)
                     fee = (shares * entry_price) * commission
                     cash -= ((shares * entry_price) + fee)
-                    stop = stop_price  
+                    stop = stop_price
                     target_price = entry_price + (tp_mult * stop_dist)
                     trades.append({"entry_date": date, "entry_price": entry_price, "equity_before": cash + (shares * price)})
 
@@ -589,37 +863,49 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
 
         if shares > 0:
             bars_held += 1
-            stop_hit = pd.notna(stop) and (price <= stop)
-            target_hit = (not half_sold) and pd.notna(target_price) and (price >= target_price)
+            stop_hit = pd.notna(stop) and (low <= stop)
+            target_hit = (not half_sold) and pd.notna(target_price) and (high >= target_price)
             time_stop_hit = (bars_held >= time_stop_bars) and (price < entry_price)
+
+            if stop_hit and target_hit:
+                target_hit = False
 
             if target_hit:
                 sell_shares = shares * 0.5
-                sell_price = price * (1 - slippage)
+                sell_price = target_price * (1 - slippage)
                 gross = sell_shares * sell_price
                 fee = gross * commission
                 cash += (gross - fee)
                 shares -= sell_shares
                 half_sold = True
                 stop = max(stop, entry_price)
-                if len(trades) > 0: trades[-1]["pnl"] = cash + (shares * price * (1 - slippage)) - trades[-1]["equity_before"]
+                if len(trades) > 0:
+                    trades[-1]["pnl"] = cash + (shares * price * (1 - slippage)) - trades[-1]["equity_before"]
 
-            if exit_sig.iloc[i] == 1 or stop_hit or time_stop_hit:
-                sell_price = price * (1 - slippage)
+            if stop_hit or exit_sig.iloc[i] == 1 or time_stop_hit:
+                sell_price = (stop if stop_hit else price) * (1 - slippage)
                 gross = shares * sell_price
                 fee = gross * commission
                 cash += (gross - fee)
                 trades[-1]["exit_date"] = date
                 trades[-1]["exit_price"] = sell_price
 
-                if stop_hit: reason = "STOP"
-                elif time_stop_hit: reason = "TIME_STOP"
-                else: reason = "RULE_EXIT"
+                if stop_hit:
+                    reason = "STOP_INTRABAR"
+                elif time_stop_hit:
+                    reason = "TIME_STOP"
+                else:
+                    reason = "RULE_EXIT"
 
                 trades[-1]["exit_reason"] = reason
                 trades[-1]["pnl"] = cash - trades[-1]["equity_before"]
 
-                shares = 0.0; stop = np.nan; entry_price = np.nan; target_price = np.nan; bars_held = 0; half_sold = False
+                shares = 0.0
+                stop = np.nan
+                entry_price = np.nan
+                target_price = np.nan
+                bars_held = 0
+                half_sold = False
 
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
@@ -657,9 +943,13 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
             diff = r_aligned - b_aligned
             info_ratio = (diff.mean() * 252) / (diff.std() * np.sqrt(252)) if diff.std() > 0 else 0.0
         else:
-            beta = 1.0; alpha = 0.0; info_ratio = 0.0
+            beta = 1.0
+            alpha = 0.0
+            info_ratio = 0.0
     else:
-        beta = 1.0; alpha = 0.0; info_ratio = 0.0
+        beta = 1.0
+        alpha = 0.0
+        info_ratio = 0.0
 
     peak = eq.cummax()
     drawdown_pct = (eq - peak) / peak
@@ -667,8 +957,10 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
 
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
-        if "pnl" not in tdf.columns: tdf["pnl"] = np.nan
-        if "exit_date" not in tdf.columns: tdf["exit_date"] = pd.NaT
+        if "pnl" not in tdf.columns:
+            tdf["pnl"] = np.nan
+        if "exit_date" not in tdf.columns:
+            tdf["exit_date"] = pd.NaT
         tdf["pnl"] = tdf["pnl"].astype(float)
         tdf["return_%"] = (tdf["pnl"] / tdf["equity_before"]) * 100
         tdf["holding_days"] = (pd.to_datetime(tdf["exit_date"]) - pd.to_datetime(tdf["entry_date"])).dt.days
@@ -677,8 +969,10 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
     if not tdf.empty and "pnl" in tdf.columns:
         gross_profit = float(tdf.loc[tdf["pnl"] > 0, "pnl"].sum())
         gross_loss = float(-tdf.loc[tdf["pnl"] < 0, "pnl"].sum())
-        if gross_loss > 0: profit_factor = gross_profit / gross_loss
-        elif gross_profit > 0 and gross_loss == 0: profit_factor = float("inf")
+        if gross_loss > 0:
+            profit_factor = gross_profit / gross_loss
+        elif gross_profit > 0 and gross_loss == 0:
+            profit_factor = float("inf")
 
     if not tdf.empty and len(tdf) > 5 and "pnl" in tdf.columns:
         win_rate = (tdf["pnl"] > 0).mean()
@@ -689,8 +983,10 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
             p = win_rate
             kelly = (p * b - (1 - p)) / b
             kelly = max(0, min(kelly, 0.10))
-        else: kelly = 0.0
-    else: kelly = 0.0
+        else:
+            kelly = 0.0
+    else:
+        kelly = 0.0
 
     metrics = {
         "Total Return": float(total_return), "Annualized Return": float(ann_return), "Annualized Volatility": float(ann_vol),
@@ -1264,9 +1560,9 @@ with st.sidebar:
     st.subheader("Zaman Aralığı")
     interval = st.selectbox(
         "Interval",
-        ["1d", "1wk", "4h", "1h"],
-        index=0,
-        help="Mum zaman dilimi. 1d günlük, 1wk haftalık, 4h 4 saatlik, 1h saatlik analiz için. Backtest için 1d önerilir.",
+        ["15m", "1h", "4h", "1d", "1wk"],
+        index=1,
+        help="Mum zaman dilimi. Günlük trade için 15m / 1h; daha sakin analiz için 4h / 1d kullanılabilir.",
     )
     period = st.selectbox("Periyot", ["45d", "3mo", "6mo", "1y", "2y"], index=3)
 
@@ -1298,6 +1594,15 @@ with st.sidebar:
     commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=10.0, step=1.0)
     slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=5.0, step=1.0)
 
+    st.subheader("Otomatik Kural Seti (Long)")
+    score_entry_threshold = st.slider("Minimum skor", 50, 95, 70, step=1)
+    adx_min = st.slider("Minimum ADX", 10, 40, 20, step=1)
+    min_rr = st.slider("Minimum RR", 1.0, 4.0, 1.8, step=0.1)
+    sr_buffer_pct = st.slider("Dirence minimum mesafe %", 0.2, 3.0, 1.0, step=0.1)
+    atr_pct_min = st.slider("Minimum ATR %", 0.0, 0.05, 0.003, step=0.001, help="Çok ölü piyasaları elemek için alt volatilite filtresi.")
+    breakout_vol_ratio = st.slider("Breakout hacim oranı", 1.0, 3.0, 1.5, step=0.1)
+    second_target_rr = st.slider("2. hedef RR", 1.5, 5.0, 2.8, step=0.1)
+
     st.divider()
     st.header("3) AI Ayarları (Gemini)")
     ai_on = st.checkbox("Gemini AI aktif", value=True)
@@ -1320,6 +1625,9 @@ cfg = {
     "ema_fast": ema_fast, "ema_slow": ema_slow, "rsi_period": rsi_period, "bb_period": bb_period,
     "bb_std": bb_std, "atr_period": atr_period, "vol_sma": vol_sma, "initial_capital": initial_capital,
     "risk_per_trade": risk_per_trade, "commission_bps": commission_bps, "slippage_bps": slippage_bps,
+    "score_entry_threshold": score_entry_threshold, "adx_min": adx_min, "min_rr": min_rr,
+    "sr_buffer_pct": sr_buffer_pct, "atr_pct_min": atr_pct_min, "breakout_vol_ratio": breakout_vol_ratio,
+    "second_target_rr": second_target_rr, "min_entry_triggers": 2, "stoch_upper": 85,
 }
 cfg.update(PRESETS[preset_name])
 
@@ -1389,18 +1697,20 @@ else:
     live = get_live_price(ticker)
     live_price = live.get("last_price", np.nan)
 
-if int(latest["ENTRY"]) == 1: rec = "AL"
-elif int(latest["EXIT"]) == 1: rec = "SAT"
-else: rec = "AL (Güçlü Trend)" if latest["SCORE"] >= 80 else ("İZLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
+if auto_plan["Action"] == "AL":
+    rec = "AL"
+elif int(latest["EXIT"]) == 1:
+    rec = "SAT"
+elif auto_plan["Action"] == "İZLE":
+    rec = "İZLE"
+else:
+    rec = "UZAK DUR"
 
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=0.0, benchmark_returns=benchmark_returns)
 tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 overbought_result = detect_speculation(df)
-
-df["EMA13_High"] = ema(df["High"], 13)
-df["EMA13_Low"] = ema(df["Low"], 13)
-df["EMA13_Close"] = ema(df["Close"], 13)
+auto_plan = build_auto_trade_plan(ticker, df, latest, tp, rr_info, cfg)
 
 # =============================
 # Build figures
@@ -1525,7 +1835,7 @@ figs_for_report = {
 # =============================
 # Tabs (Dashboard, Export, Heatmap, Triple Screen, Screener)
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_screener = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Kripto Heatmap", "📺 3 Ekranlı Sistem", "🔍 Çoklu Tarayıcı (Screener)"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_rules, tab_screener = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Kripto Heatmap", "📺 3 Ekranlı Sistem", "🎯 Tara ve Öner", "🔍 Çoklu Tarayıcı (Screener)"])
 
 with tab_dash:
     if use_timemachine:
@@ -1663,7 +1973,7 @@ with tab_dash:
     with colV2: st.plotly_chart(fig_vol_2wk, use_container_width=True)
     with colV3: st.plotly_chart(fig_obv, use_container_width=True)
 
-    st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
+    st.subheader("🧪 Backtest Özeti (Long-only + Intrabar Stop/Target + Scale Out + Time Stop)")
     m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
     m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
     m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
@@ -2167,7 +2477,90 @@ with tab_triple:
                         st.plotly_chart(fig3_adx, use_container_width=True)
 
 # =============================
-# YENİ EKLENEN 5. SEKME: GELİŞMİŞ ÇOKLU TARAYICI (SCREENER)
+# YENİ EKLENEN SEKME: TARA VE ÖNER
+# =============================
+with tab_rules:
+    st.header("🎯 Tara ve Öner — Otomatik Long Kural Seti")
+    st.markdown("Tek tuşla coinleri tarar, long kurallarını uygular ve **alış / stop / hedef** rakamlarını üretir. Mevcut sekmeler korunmuştur; bu sekme tamamen öneri üretmek içindir.")
+
+    if use_timemachine:
+        st.warning(f"Zaman Makinesi Aktif: Tarama **{target_datetime}** verileri baz alınarak yapılacaktır.")
+
+    rule_scan_source = st.radio(
+        "Tarama evreni",
+        ["Midas Kripto (Sadece Midas'ta olan coinler)", "Tüm Piyasa (KuCoin)", "Özel Listem"],
+        key="rule_scan_source"
+    )
+
+    rule_custom_input = ""
+    if rule_scan_source == "Özel Listem":
+        rule_custom_input = st.text_area(
+            "Özel coin listesi",
+            placeholder="Örn: BTC/USDT, ETH/USDT, SOL/USDT",
+            key="rule_custom_input"
+        )
+
+    rr_col1, rr_col2, rr_col3 = st.columns(3)
+    rule_scan_count = rr_col1.slider("Maksimum coin sayısı", 10, 300, 120, step=10, key="rule_scan_count")
+    rule_scan_tf = rr_col2.selectbox("Giriş periyodu", ["15m", "1h", "4h", "1d"], index=1, key="rule_scan_tf")
+    only_buy_candidates = rr_col3.checkbox("Sadece AL adaylarını göster", value=True, key="only_buy_candidates")
+
+    if st.button("🚀 Tara ve Öneriyi Çalıştır", key="run_rule_screener"):
+        all_coins = resolve_scan_universe(rule_scan_source, rule_custom_input, rule_scan_count)
+        results = []
+        progress_bar = st.progress(0)
+        status = st.empty()
+
+        for i, coin in enumerate(all_coins):
+            status.text(f"Kural seti uygulanıyor ({rule_scan_tf}): {coin} | {i+1}/{len(all_coins)}")
+            try:
+                row = evaluate_symbol_for_screener(
+                    coin,
+                    rule_scan_tf,
+                    cfg,
+                    target_datetime=target_datetime,
+                    use_btc_filter=use_btc_filter,
+                    use_higher_tf_filter=use_higher_tf_filter,
+                )
+                if row is not None:
+                    results.append(row)
+            except Exception:
+                pass
+
+            progress_bar.progress((i + 1) / len(all_coins))
+            time.sleep(0.25)
+
+        status.empty()
+
+        if results:
+            df_rule_results = pd.DataFrame(results)
+            df_rule_results = df_rule_results.sort_values(by=["Skor (100)", "RR"], ascending=[False, False]).reset_index(drop=True)
+            if only_buy_candidates:
+                df_rule_results = df_rule_results[df_rule_results["Durum"] == "AL"].reset_index(drop=True)
+
+            st.success(f"✅ {len(results)} coin üzerinde otomatik kural seti çalıştı.")
+            if df_rule_results.empty:
+                st.info("Filtreye uyan AL adayı bulunamadı. 'Sadece AL adaylarını göster' kutusunu kapatıp tüm sonuçları inceleyebilirsiniz.")
+            else:
+                top_show = min(len(df_rule_results), 15)
+                st.subheader(f"En iyi {top_show} aday")
+                st.dataframe(df_rule_results.head(top_show), use_container_width=True, height=520)
+
+                best = df_rule_results.iloc[0]
+                st.markdown("### Seçili en iyi aday özeti")
+                b1, b2, b3, b4, b5, b6 = st.columns(6)
+                b1.metric("Sembol", best["Sembol"])
+                b2.metric("Durum", best["Durum"])
+                b3.metric("Alış", f"{best['Alış']:.6f}" if pd.notna(best["Alış"]) else "N/A")
+                b4.metric("Stop", f"{best['Stop']:.6f}" if pd.notna(best["Stop"]) else "N/A")
+                b5.metric("Hedef 1", f"{best['Hedef 1']:.6f}" if pd.notna(best["Hedef 1"]) else "N/A")
+                b6.metric("RR", f"1:{best['RR']:.2f}" if pd.notna(best["RR"]) else "N/A")
+                st.info(best["Not"])
+        else:
+            st.error("Tarama başarısız oldu veya seçilen coinlerde yeterli veri bulunamadı.")
+
+# =============================
+# GELİŞMİŞ ÇOKLU TARAYICI (SCREENER)
 # =============================
 with tab_screener:
     st.header("🔍 Gelişmiş Çoklu Kripto Tarayıcı (Screener)")
@@ -2193,49 +2586,10 @@ with tab_screener:
 
     sc_col1, sc_col2 = st.columns(2)
     scan_count = sc_col1.slider("Taranacak Maksimum Coin Sayısı (Yüksek sayı biraz zaman alabilir)", 10, 300, 250, step=10)
-    scan_tf = sc_col2.selectbox("Tarama Periyodu", ["1h", "4h", "1d"], index=2)
+    scan_tf = sc_col2.selectbox("Tarama Periyodu", ["15m", "1h", "4h", "1d"], index=2)
     
     if st.button("🚀 Kapsamlı Taramayı Başlat"):
-        kucoin_universe = get_crypto_universe()
-
-        if scan_source == "Özel Listem" and custom_tickers_input.strip():
-            raw_list = custom_tickers_input.replace("\n", ",").split(",")
-            all_coins = [c.strip().upper() for c in raw_list if c.strip()]
-            all_coins = [c if "/" in c else f"{c}/USDT" for c in all_coins]
-            all_coins = list(dict.fromkeys(all_coins)) 
-        elif scan_source == "Midas Kripto":
-            midas_tickers = [
-                "WCT", "0G", "1INCH", "AEVO", "AAVE", "ACM", "ACX", "ACT", "AERO", "AI16Z", 
-                "AIXBT", "ACH", "ALGO", "ALLO", "AMP", "ANIME", "ANKR", "APE", "API3", "APT", 
-                "ARB", "ARK", "ARKM", "ARPA", "FET", "AR", "ASR", "ASTR", "ASTER", "ATM", 
-                "BEAT", "AUDIO", "AVAX", "AXL", "AXS", "BEAM", "BEL", "BERA", "BNB", "BNX", 
-                "BIO", "BTC", "BCH", "TAO", "BTT", "BLUR", "BONK", "BOME", "AUCTION", "BB", 
-                "ZKC", "BRETT", "BREV", "BMT", "GALA", "ADA", "MEW", "CATI", "TIA", "CFG", 
-                "CETUS", "LINK", "COAI", "CHZ", "COMP", "CFX", "CORE", "ATOM", "COTI", "COW", 
-                "CRO", "CRV", "CYBER", "MANA", "HOME", "DEGEN", "DOGE", "DOGS", "WIF", "2Z", 
-                "DYDX", "DYM", "EIGEN", "ENJ", "ENSO", "EOS", "ENA", "ETHFI", "ETH", "ENS", 
-                "ROBO", "FF", "FARTCOIN", "BAR", "PORTO", "FIL", "FLOKI", "FOGO", "GMT", "GOAT", 
-                "GPS", "GRASS", "G", "HMSTR", "HBAR", "HOT", "ZEN", "HUMA", "H", "WET", "HYPE", 
-                "IMX", "INIT", "INJ", "ICP", "IO", "IOTA", "JASMY", "JTO", "JUP", "JUV", "KAIA", 
-                "KAITO", "KAS", "KERNEL", "KITE", "KSM", "LAUNCHCOIN", "ZRO", "LDO", "LIT", "LINEA", 
-                "LTC", "LPT", "BARD", "LUMIA", "ME", "CITY", "OM", "MANTA", "SYRUP", "MASK", 
-                "MEME", "MERL", "MET", "METIS", "MINA", "MOG", "MOODENG", "MORPHO", "MOVE", "EGLD", 
-                "SHELL", "NEAR", "NEIRO", "NEO", "NEWT", "NOT", "NMR", "ROSE", "TRUMP", "OMNI", 
-                "ONDO", "XCN", "EDU", "EDEN", "OPN", "OP", "ORCA", "ORDER", "ORDI", "OGN", "CAKE", 
-                "PRCL", "PSG", "PAXG", "PYUSD", "PNUT", "PENDLE", "PEPE", "PHA", "PI", "PIXEL", 
-                "XPL", "PLUME", "DOT", "POL", "PENGU", "PUMP", "PYTH", "QTUM", "QNT", "RAD", "RAVE", 
-                "RAY", "RIO", "RED", "RENDER", "REZ", "XRP", "RONIN", "LAZIO", "SAGA", "SAHARA", 
-                "SCR", "SKR", "SEI", "SENT", "SHIB", "CAT", "SKL", "SKY", "SOL", "LAYER", "SOLV", 
-                "SOMI", "S", "SXT", "SPELL", "SPX", "STX", "STRK", "XLM", "STEEM", "STORJ", "IP", 
-                "SUI", "RARE", "SUPER", "SUSHI", "SNX", "TRB", "TNSR", "USDT", "EURT", "XAUT", 
-                "GRT", "SAND", "THETA", "TON", "TOSHI", "MAGIC", "TREE", "TRX", "TRU", "TWT", 
-                "TURBO", "UMA", "UNI", "USDC", "USUAL", "VANA", "VANRY", "VET", "VVV", "VINE", 
-                "VIRTUAL", "VSN", "WAL", "WLFI", "WLD", "W", "XAI", "ZETA", "ZEUS", "ZK", "ZORA"
-            ]
-            midas_coins = [f"{c.upper()}/USDT" for c in midas_tickers]
-            all_coins = [c for c in midas_coins if c in kucoin_universe][:scan_count]
-        else:
-            all_coins = kucoin_universe[:scan_count]
+        all_coins = resolve_scan_universe(scan_source, custom_tickers_input, scan_count)
 
         results = []
         progress_bar = st.progress(0)
@@ -2247,57 +2601,16 @@ with tab_screener:
             status.text(f"Taranıyor ({scan_tf}): {coin_name} | {i+1}/{len(all_coins)} tamamlandı.")
             
             try:
-                # Sadece kullanıcının seçtiği periyodu çeker
-                df_scan = load_data_cached(coin, "1y", scan_tf, target_datetime)
-                if not df_scan.empty and len(df_scan) >= 50:
-                    feat_scan = build_features(df_scan, cfg)
-                    last_row = feat_scan.iloc[-1]
-                    
-                    # KOMPLEKS SKORLAMA (Max 100)
-                    score = 0
-                    if last_row["Close"] > last_row["EMA200"]: score += 10
-                    if last_row["EMA50"] > last_row["EMA200"]: score += 10
-                    
-                    rsi_val = last_row["RSI"]
-                    if 50 < rsi_val < 70: score += 10
-                    elif rsi_val <= 30: score += 15 
-                    
-                    if last_row["MACD_hist"] > 0: score += 10
-                    if last_row["ADX"] > 25 and last_row["PLUS_DI"] > last_row["MINUS_DI"]: score += 15
-                    if last_row["STOCH_K"] > last_row["STOCH_D"] and last_row["STOCH_K"] < 80: score += 10
-                    
-                    if last_row["Close"] > last_row["BB_mid"]: score += 5
-                    if last_row["BB_WIDTH"] < 0.10: score += 5 
-                    
-                    if last_row["OBV"] > last_row.get("OBV_EMA", last_row["OBV"]): score += 5
-                    if last_row["Volume"] > last_row.get("VOL_SMA", 0): score += 5
-                    
-                    bull_patterns = ["KANGAROO_BULL", "PATTERN_ENGULFING_BULL", "PATTERN_HAMMER", "PATTERN_MORNING_STAR", "PATTERN_PIERCING", "PATTERN_MARUBOZU_BULL"]
-                    bear_patterns = ["KANGAROO_BEAR", "PATTERN_ENGULFING_BEAR", "PATTERN_SHOOTING_STAR", "PATTERN_EVENING_STAR", "PATTERN_DARK_CLOUD", "PATTERN_MARUBOZU_BEAR"]
-                    
-                    has_bull = any(last_row.get(p, 0) == 1 for p in bull_patterns)
-                    has_bear = any(last_row.get(p, 0) == 1 for p in bear_patterns)
-                    
-                    if has_bull: score += 10
-                    if has_bear: score -= 15
-                    
-                    score = max(0, min(100, score))
-                    
-                    results.append({
-                        "Sembol": coin,
-                        "Periyot": scan_tf.upper(),
-                        "Fiyat": f"{last_row['Close']:.4f}",
-                        "Skor (100)": score,
-                        "Durum": "Güçlü Al 🚀" if score >= 80 else ("Al 🟢" if score >= 60 else ("Nötr ⚪" if score >= 40 else "Sat 🔴")),
-                        "RSI": round(rsi_val, 2),
-                        "MACD Hist": "Pozitif 🟢" if last_row["MACD_hist"] > 0 else "Negatif 🔴",
-                        "ADX Trend": "Güçlü Boğa 🟢" if (last_row["ADX"] > 25 and last_row["PLUS_DI"] > last_row["MINUS_DI"]) else ("Güçlü Ayı 🔴" if last_row["ADX"] > 25 else "Zayıf/Yatay ⚪"),
-                        "StochRSI": "Alışta 🟢" if (last_row["STOCH_K"] > last_row["STOCH_D"] and last_row["STOCH_K"] < 80) else "Satış/Aşırı 🔴",
-                        "BB Genişlik": f"%{last_row['BB_WIDTH']*100:.1f}",
-                        "Hacim": "Yüksek 🟢" if last_row["Volume"] > last_row["VOL_SMA"] else "Düşük 🔴",
-                        "OBV": "Pozitif 🟢" if last_row["OBV"] > last_row["OBV_EMA"] else "Negatif 🔴",
-                        "Formasyon": "Boğa 🟢" if has_bull else ("Ayı 🔴" if has_bear else "-")
-                    })
+                row = evaluate_symbol_for_screener(
+                    coin,
+                    scan_tf,
+                    cfg,
+                    target_datetime=target_datetime,
+                    use_btc_filter=use_btc_filter,
+                    use_higher_tf_filter=use_higher_tf_filter,
+                )
+                if row is not None:
+                    results.append(row)
             except Exception:
                 pass
             
